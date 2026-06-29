@@ -114,24 +114,20 @@ st.markdown(
 
 with st.container(border=True):
     st.markdown('<div class="section-label">📁 文件操作</div>', unsafe_allow_html=True)
+    uploaded_file = st.file_uploader(
+        "上传 Excel 成绩表",
+        type=["xlsx", "xls"],
+    )
     st.markdown(
-        '<p class="section-note">可先下载模板录入成绩，也可以直接上传已有 Excel 成绩表。</p>',
+        '<p class="section-note">已有成绩表可直接上传；没有表格？可下载单科成绩模板。</p>',
         unsafe_allow_html=True,
     )
-    template_col, upload_col = st.columns([1, 2])
-    with template_col:
-        st.download_button(
-            "下载单科成绩模板",
-            data=create_single_score_template(),
-            file_name="单科成绩模板.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with upload_col:
-        uploaded_file = st.file_uploader(
-            "上传 Excel 成绩表",
-            type=["xlsx", "xls"],
-        )
+    st.download_button(
+        "下载单科成绩模板",
+        data=create_single_score_template(),
+        file_name="单科成绩模板.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def pick_column_index(columns, matched_column, fallback_index=0):
