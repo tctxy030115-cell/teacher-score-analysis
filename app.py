@@ -13,6 +13,7 @@ from grade_logic import (
     export_score_result_to_bytes,
     find_first_matching_column,
     format_class_value,
+    has_analyzable_columns,
     normalize_excellent_percent,
 )
 
@@ -139,6 +140,21 @@ with st.container(border=True):
         "上传 Excel 成绩表",
         type=["xlsx", "xls"],
     )
+    selected_sheet = None
+    if uploaded_file:
+        try:
+            uploaded_file.seek(0)
+            excel_file = pd.ExcelFile(uploaded_file)
+            sheet_names = excel_file.sheet_names
+            selected_sheet = st.selectbox(
+                "选择要分析的工作表",
+                sheet_names,
+                index=0,
+            )
+        except Exception as e:
+            st.error(f"读取 Excel 工作表失败：{e}")
+            st.stop()
+
     st.markdown(
         '<p class="section-note">已有成绩表可直接上传；没有表格？可下载单科成绩模板。</p>',
         unsafe_allow_html=True,
@@ -153,10 +169,11 @@ with st.container(border=True):
 
 if uploaded_file:
     try:
-        raw_df = pd.read_excel(uploaded_file, header=None)
+        uploaded_file.seek(0)
+        raw_df = pd.read_excel(uploaded_file, sheet_name=selected_sheet, header=None)
 
         if raw_df.empty:
-            st.error("Excel 表格没有可分析的数据。")
+            st.error("当前工作表未识别到可分析的成绩数据，请选择其他工作表。")
             st.stop()
 
         detected_header_row = detect_header_row(raw_df)
@@ -191,6 +208,10 @@ if uploaded_file:
             st.stop()
 
         columns = df.columns.tolist()
+        if not has_analyzable_columns(columns):
+            st.error("当前工作表未识别到可分析的成绩数据，请选择其他工作表。")
+            st.stop()
+
         matched_name_col = find_first_matching_column(columns, NAME_COLUMN_ALIASES)
         matched_score_col = find_first_matching_column(columns, SCORE_COLUMN_ALIASES)
         matched_class_col = find_first_matching_column(columns, CLASS_COLUMN_ALIASES)

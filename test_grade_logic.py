@@ -13,6 +13,7 @@ from grade_logic import (
     detect_header_row,
     export_score_result_to_bytes,
     find_first_matching_column,
+    has_analyzable_columns,
     format_class_value,
     build_class_options,
     get_score_level,
@@ -81,6 +82,12 @@ class GradeLogicTest(unittest.TestCase):
         self.assertEqual(find_first_matching_column(columns, ["姓名", "学生姓名"]), "学生姓名")
         self.assertEqual(find_first_matching_column(columns, ["分数", "成绩", "数学"]), "数学")
         self.assertIsNone(find_first_matching_column(columns, ["总分"]))
+
+    def test_has_analyzable_columns_requires_name_and_score_or_subject(self):
+        self.assertTrue(has_analyzable_columns(["班级", "姓名", "数学"]))
+        self.assertTrue(has_analyzable_columns(["学生姓名", "成绩"]))
+        self.assertFalse(has_analyzable_columns(["班级", "姓名", "备注"]))
+        self.assertFalse(has_analyzable_columns(["班级", "数学", "备注"]))
 
     def test_detect_header_row_finds_school_report_header_on_second_row(self):
         raw_df = pd.DataFrame(

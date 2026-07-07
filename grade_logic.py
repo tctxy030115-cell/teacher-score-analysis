@@ -30,6 +30,13 @@ def find_first_matching_column(columns, aliases):
     return None
 
 
+def has_analyzable_columns(columns):
+    return (
+        find_first_matching_column(columns, NAME_COLUMN_ALIASES) is not None
+        and find_first_matching_column(columns, SCORE_COLUMN_ALIASES) is not None
+    )
+
+
 def format_class_value(value):
     if value is None:
         return ""
