@@ -1,11 +1,13 @@
 from io import BytesIO
 
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
 
 
 NAME_COLUMN_ALIASES = ["姓名", "学生姓名", "名字", "姓名列"]
 SCORE_COLUMN_ALIASES = ["分数", "成绩", "数学", "语文", "英语", "物理", "化学", "道法", "历史", "地理", "生物", "总分"]
+CLASS_COLUMN_ALIASES = ["班级", "班别", "行政班", "班级名称"]
 
 
 def clean_column_name(column_name):
@@ -26,6 +28,39 @@ def find_first_matching_column(columns, aliases):
             if clean_column_name(column) == alias:
                 return column
     return None
+
+
+def format_class_value(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except NameError:
+        pass
+    except TypeError:
+        pass
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+
+    text = str(value).strip()
+    if text.endswith(".0"):
+        numeric_text = text[:-2]
+        if numeric_text.isdigit():
+            return numeric_text
+    return text
+
+
+def build_class_options(class_values):
+    seen = set()
+    options = ["全部班级"]
+    for value in class_values:
+        formatted = format_class_value(value)
+        if formatted and formatted not in seen:
+            seen.add(formatted)
+            options.append(formatted)
+    return options
 
 
 def detect_header_row(raw_dataframe, max_scan_rows=15):
@@ -74,7 +109,7 @@ def get_score_level(score, full_score=100, excellent_percent=90):
     return "不及格"
 
 
-def analyze_scores(student_scores, full_score=100, excellent_percent=90):
+def analyze_scores(student_scores, full_score=100, excellent_percent=90, current_class="全部班级", current_subject=""):
     excellent_percent = normalize_excellent_percent(excellent_percent)
     score_details = []
     excellent_students = []
@@ -138,6 +173,8 @@ def analyze_scores(student_scores, full_score=100, excellent_percent=90):
         "excellent_percent": excellent_percent,
         "good_percent": 80,
         "pass_percent": 60,
+        "current_class": current_class,
+        "current_subject": current_subject,
     }
 
 
@@ -197,6 +234,8 @@ def export_score_result_to_bytes(analysis_result):
 
     basic_sheet = workbook.create_sheet("基础统计")
     basic_sheet.append(["统计项目", "统计结果"])
+    basic_sheet.append(["当前班级", analysis_result.get("current_class", "全部班级")])
+    basic_sheet.append(["当前分析科目", analysis_result.get("current_subject", "")])
     basic_sheet.append(["满分", analysis_result["full_score"]])
     basic_sheet.append(["优秀线", format_percent(analysis_result["excellent_percent"])])
     basic_sheet.append(["良好线", format_percent(analysis_result["good_percent"])])

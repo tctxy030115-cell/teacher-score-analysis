@@ -5,6 +5,7 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from grade_logic import (
+    CLASS_COLUMN_ALIASES,
     analyze_scores,
     build_dataframe_from_header,
     clean_column_name,
@@ -12,6 +13,8 @@ from grade_logic import (
     detect_header_row,
     export_score_result_to_bytes,
     find_first_matching_column,
+    format_class_value,
+    build_class_options,
     get_score_level,
 )
 
@@ -140,6 +143,38 @@ class GradeLogicTest(unittest.TestCase):
         self.assertEqual(values["及格线"], "60%")
         self.assertEqual(values["优秀人数"], 1)
         self.assertEqual(values["不及格人数"], 1)
+
+    def test_class_aliases_and_options_support_numeric_and_text_classes(self):
+        self.assertIn("班级", CLASS_COLUMN_ALIASES)
+        self.assertIn("行政班", CLASS_COLUMN_ALIASES)
+
+        class_values = pd.Series([2401.0, "2402班", 2401, None, " 2403 "])
+
+        self.assertEqual(format_class_value(2401.0), "2401")
+        self.assertEqual(format_class_value("2401班"), "2401班")
+        self.assertEqual(build_class_options(class_values), ["全部班级", "2401", "2402班", "2403"])
+
+    def test_analyze_scores_and_export_include_current_class_and_subject(self):
+        result = analyze_scores(
+            {"张三": 117, "李四": 98},
+            full_score=120,
+            excellent_percent=90,
+            current_class="2401",
+            current_subject="数学",
+        )
+        data = export_score_result_to_bytes(result)
+
+        workbook = load_workbook(data)
+        basic_sheet = workbook["基础统计"]
+        values = {basic_sheet.cell(row=row, column=1).value: basic_sheet.cell(row=row, column=2).value for row in range(1, basic_sheet.max_row + 1)}
+
+        self.assertEqual(result["current_class"], "2401")
+        self.assertEqual(result["current_subject"], "数学")
+        self.assertEqual(values["当前班级"], "2401")
+        self.assertEqual(values["当前分析科目"], "数学")
+        self.assertEqual(values["满分"], 120)
+        self.assertEqual(values["优秀线"], "90%")
+        self.assertEqual(values["及格线"], "60%")
 
 
 if __name__ == "__main__":
