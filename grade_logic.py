@@ -24,6 +24,7 @@ SUBJECT_COLUMN_ALIASES = [
 SCORE_COLUMN_ALIASES = ["分数", "成绩", *SUBJECT_COLUMN_ALIASES, "总分"]
 CLASS_COLUMN_ALIASES = ["班级", "班别", "行政班", "班级名称"]
 TOTAL_SCORE_KEYWORDS = ("总分", "总成绩", "合计")
+SCORE_COLUMN_SUFFIXES = ("分数", "成绩", "得分", "分")
 FULL_SCORE_NOTICE = "当前选择的是总分列，请确认总分满分，避免有效成绩被错误过滤。"
 
 
@@ -39,13 +40,26 @@ def clean_dataframe_columns(dataframe):
     return cleaned
 
 
-def is_total_score_column(column_name):
+def normalize_score_column_name(column_name):
     cleaned_name = clean_column_name(column_name)
-    return any(keyword in cleaned_name for keyword in TOTAL_SCORE_KEYWORDS)
+    if any(cleaned_name.endswith(keyword) for keyword in TOTAL_SCORE_KEYWORDS):
+        return "总分"
+
+    for suffix in SCORE_COLUMN_SUFFIXES:
+        if cleaned_name.endswith(suffix) and cleaned_name != suffix:
+            base_name = cleaned_name[: -len(suffix)]
+            if any(base_name.endswith(keyword) for keyword in TOTAL_SCORE_KEYWORDS):
+                return "总分"
+            return base_name
+    return cleaned_name
+
+
+def is_total_score_column(column_name):
+    return normalize_score_column_name(column_name) == "总分"
 
 
 def suggest_full_score(column_name):
-    cleaned_name = clean_column_name(column_name)
+    cleaned_name = normalize_score_column_name(column_name)
     if is_total_score_column(cleaned_name):
         return 800.0
     if any(subject in cleaned_name for subject in ("语文", "数学", "英语")):
@@ -85,10 +99,22 @@ def find_first_matching_column(columns, aliases):
     return None
 
 
+def find_first_matching_score_column(columns):
+    recognized_subjects = set(SUBJECT_COLUMN_ALIASES)
+    for column in columns:
+        if normalize_score_column_name(column) in recognized_subjects:
+            return column
+
+    for column in columns:
+        if normalize_score_column_name(column) in {"分数", "成绩", "总分"}:
+            return column
+    return None
+
+
 def has_analyzable_columns(columns):
     return (
         find_first_matching_column(columns, NAME_COLUMN_ALIASES) is not None
-        and find_first_matching_column(columns, SCORE_COLUMN_ALIASES) is not None
+        and find_first_matching_score_column(columns) is not None
     )
 
 
@@ -131,7 +157,7 @@ def detect_header_row(raw_dataframe, max_scan_rows=15):
         columns = [clean_column_name(value) for value in raw_dataframe.iloc[row_index].tolist()]
         if (
             find_first_matching_column(columns, NAME_COLUMN_ALIASES) is not None
-            and find_first_matching_column(columns, SCORE_COLUMN_ALIASES) is not None
+            and find_first_matching_score_column(columns) is not None
         ):
             return row_index
     return None

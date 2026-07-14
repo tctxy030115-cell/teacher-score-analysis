@@ -8,6 +8,7 @@ import grade_logic
 
 from grade_logic import (
     CLASS_COLUMN_ALIASES,
+    NAME_COLUMN_ALIASES,
     analyze_scores,
     build_dataframe_from_header,
     clean_column_name,
@@ -23,6 +24,70 @@ from grade_logic import (
 
 
 class GradeLogicTest(unittest.TestCase):
+    def test_normalize_score_column_name_supports_common_suffixes_and_total_aliases(self):
+        self.assertTrue(
+            hasattr(grade_logic, "normalize_score_column_name"),
+            "缺少 normalize_score_column_name",
+        )
+
+        cases = {
+            " 数学分数\n": "数学",
+            "英语成绩": "英语",
+            "物理得分": "物理",
+            "体育分": "体育",
+            "总分分数": "总分",
+            "总成绩": "总分",
+            "总成绩分数": "总分",
+            "合计": "总分",
+            "合计分数": "总分",
+            "班级分数线": "班级分数线",
+            "年级平均分": "年级平均",
+        }
+        for original, expected in cases.items():
+            with self.subTest(original=original):
+                self.assertEqual(grade_logic.normalize_score_column_name(original), expected)
+
+    def test_score_column_matcher_prefers_first_regular_subject_and_preserves_original_name(self):
+        self.assertTrue(
+            hasattr(grade_logic, "find_first_matching_score_column"),
+            "缺少 find_first_matching_score_column",
+        )
+        columns = ["班级", "姓名", "总成绩分数", "语文成绩", "数学分数"]
+
+        self.assertEqual(grade_logic.find_first_matching_score_column(columns), "语文成绩")
+        self.assertTrue(has_analyzable_columns(columns))
+        self.assertEqual(find_first_matching_column(columns, NAME_COLUMN_ALIASES), "姓名")
+        self.assertEqual(find_first_matching_column(columns, CLASS_COLUMN_ALIASES), "班级")
+
+    def test_score_column_recognition_rejects_descriptive_columns(self):
+        self.assertTrue(
+            hasattr(grade_logic, "find_first_matching_score_column"),
+            "缺少 find_first_matching_score_column",
+        )
+        descriptive_columns = ["班级", "姓名", "考号", "学号", "排名", "名次", "班级分数线", "年级平均分"]
+
+        self.assertIsNone(grade_logic.find_first_matching_score_column(descriptive_columns))
+        self.assertFalse(has_analyzable_columns(descriptive_columns))
+
+    def test_header_detection_accepts_suffixed_score_columns(self):
+        self.assertTrue(
+            hasattr(grade_logic, "find_first_matching_score_column"),
+            "缺少 find_first_matching_score_column",
+        )
+        raw_df = pd.DataFrame(
+            [
+                ["班级", "姓名", "语文分数", "数学分数", "总分分数"],
+                ["1班", "张三", 110, 115, 225],
+            ]
+        )
+
+        self.assertEqual(detect_header_row(raw_df), 0)
+        self.assertTrue(has_analyzable_columns(raw_df.iloc[0].tolist()))
+        self.assertEqual(
+            grade_logic.find_first_matching_score_column(raw_df.iloc[0].tolist()),
+            "语文分数",
+        )
+
     def test_full_score_helpers_support_isolated_column_settings_and_total_notice(self):
         required_helpers = [
             "build_full_score_context_key",
