@@ -1,11 +1,22 @@
 import pandas as pd
 import streamlit as st
 
+from chart_logic import (
+    build_invalid_data_warning,
+    build_distribution_figure,
+    build_level_donut_figure,
+    build_subject_average_figure,
+    calculate_score_distribution,
+    calculate_subject_averages,
+    classify_score_rows,
+    count_invalid_reasons,
+)
 from grade_logic import (
     CLASS_COLUMN_ALIASES,
     NAME_COLUMN_ALIASES,
     SCORE_COLUMN_ALIASES,
     analyze_scores,
+    build_full_score_context_key,
     build_class_options,
     build_dataframe_from_header,
     create_single_score_template,
@@ -13,8 +24,11 @@ from grade_logic import (
     export_score_result_to_bytes,
     find_first_matching_column,
     format_class_value,
+    get_column_full_score,
+    get_total_score_notice,
     has_analyzable_columns,
     normalize_excellent_percent,
+    set_column_full_score,
 )
 
 
@@ -259,16 +273,26 @@ if uploaded_file:
         with st.container(border=True):
             st.markdown('<div class="section-label">📐 评价标准</div>', unsafe_allow_html=True)
             st.markdown(
-                '<p class="section-note">默认规则：优秀≥满分的90%，良好≥80%，及格≥60%。请确认当前科目满分。</p>',
+                '<p class="section-note">默认规则：优秀≥满分的90%，良好≥80%，及格≥60%。请确认当前分析列满分。</p>',
                 unsafe_allow_html=True,
+            )
+            score_context_key = build_full_score_context_key(uploaded_file.getvalue(), selected_sheet)
+            full_score_settings = st.session_state.setdefault("full_score_by_context", {})
+            suggested_full_score = get_column_full_score(
+                full_score_settings,
+                score_context_key,
+                score_col,
             )
             col_full_score, col_excellent_percent = st.columns(2)
             full_score = col_full_score.number_input(
-                "本次考试满分",
+                "当前分析列满分",
                 min_value=1.0,
-                value=100.0,
+                value=suggested_full_score,
                 step=1.0,
+                key=f"full_score::{score_context_key}::{score_col}",
             )
+            set_column_full_score(full_score_settings, score_context_key, score_col, full_score)
+            col_full_score.caption("请填写当前所选成绩列的满分，例如数学 120 分、总分 800 分。")
             excellent_percent = col_excellent_percent.number_input(
                 "优秀线（%）",
                 min_value=0.0,
@@ -279,6 +303,9 @@ if uploaded_file:
             effective_excellent_percent = normalize_excellent_percent(excellent_percent)
             if excellent_percent < 60:
                 st.warning("优秀线不能低于及格线 60%，本次分析将按 60% 处理。")
+            total_score_notice = get_total_score_notice(score_col)
+            if total_score_notice:
+                st.info(total_score_notice)
 
         if name_col == score_col:
             st.error("请选择不同的姓名列和分析科目 / 成绩列。")
@@ -297,25 +324,25 @@ if uploaded_file:
         if class_col is not None:
             selected[class_col] = selected[class_col].apply(format_class_value)
 
-        selected["姓名"] = selected[name_col].astype(str).str.replace("\u3000", "", regex=False).str.strip()
-        selected["分数"] = pd.to_numeric(selected[score_col], errors="coerce")
+        classified_rows = classify_score_rows(
+            selected[name_col],
+            selected[score_col],
+            full_score=full_score,
+        )
+        selected["姓名"] = classified_rows["姓名"]
+        selected["分数"] = classified_rows["分数"]
+        selected["无效原因"] = classified_rows["无效原因"]
+        valid_scores = selected[selected["无效原因"].isna()].copy()
 
-        valid_scores = selected[
-            (selected["姓名"] != "")
-            & (selected["姓名"].str.lower() != "nan")
-            & selected["分数"].notna()
-            & (selected["分数"] >= 0)
-        ].copy()
-
-        skipped_count = len(selected) - len(valid_scores)
-        if skipped_count > 0:
-            st.warning(f"已跳过 {skipped_count} 行姓名为空、分数为空、分数不是数字或分数为负数的数据。")
+        invalid_reason_counts = count_invalid_reasons(classified_rows)
+        invalid_warning = build_invalid_data_warning(invalid_reason_counts, full_score)
+        if invalid_warning:
+            st.warning(invalid_warning)
 
         if valid_scores.empty:
-            if class_col is not None and selected_class != "全部班级":
-                st.error("当前班级没有可分析的有效成绩。")
-            else:
-                st.error("没有可分析的有效成绩，请检查姓名列和分析科目 / 成绩列。")
+            with st.container(border=True):
+                st.markdown('<div class="section-label">📊 成绩可视化分析</div>', unsafe_allow_html=True)
+                st.info("当前筛选条件下没有可用于分析的有效成绩。")
             st.stop()
 
         student_scores = dict(zip(valid_scores["姓名"], valid_scores["分数"]))
@@ -339,6 +366,43 @@ if uploaded_file:
             c6.metric("不及格人数", analysis_result["fail_count"])
             c7.metric("及格率", f"{analysis_result['pass_rate']:.1f}%")
             c8.metric("优秀率", f"{analysis_result['excellent_rate']:.1f}%")
+
+        distribution = calculate_score_distribution(
+            valid_scores["分数"],
+            full_score=full_score,
+            excellent_percent=effective_excellent_percent,
+        )
+        valid_names = analysis_df[name_col].astype(str).str.replace("\u3000", "", regex=False).str.strip()
+        subject_source = analysis_df[
+            (valid_names != "") & (valid_names.str.lower() != "nan")
+        ].copy()
+        subject_averages = calculate_subject_averages(subject_source)
+        chart_config = {"displayModeBar": False, "displaylogo": False}
+
+        with st.container(border=True):
+            st.markdown('<div class="section-label">📊 成绩可视化分析</div>', unsafe_allow_html=True)
+            distribution_column, level_column = st.columns(2)
+            with distribution_column:
+                st.plotly_chart(
+                    build_distribution_figure(distribution),
+                    use_container_width=True,
+                    config=chart_config,
+                )
+            with level_column:
+                st.plotly_chart(
+                    build_level_donut_figure(distribution),
+                    use_container_width=True,
+                    config=chart_config,
+                )
+
+            if subject_averages.empty:
+                st.info("当前未识别到两个及以上有效科目。")
+            else:
+                st.plotly_chart(
+                    build_subject_average_figure(subject_averages),
+                    use_container_width=True,
+                    config=chart_config,
+                )
 
         detail_df = pd.DataFrame(
             analysis_result["score_details"],

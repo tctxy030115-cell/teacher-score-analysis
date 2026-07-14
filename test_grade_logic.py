@@ -4,6 +4,8 @@ import unittest
 import pandas as pd
 from openpyxl import load_workbook
 
+import grade_logic
+
 from grade_logic import (
     CLASS_COLUMN_ALIASES,
     analyze_scores,
@@ -21,6 +23,41 @@ from grade_logic import (
 
 
 class GradeLogicTest(unittest.TestCase):
+    def test_full_score_helpers_support_isolated_column_settings_and_total_notice(self):
+        required_helpers = [
+            "build_full_score_context_key",
+            "get_column_full_score",
+            "set_column_full_score",
+            "suggest_full_score",
+            "get_total_score_notice",
+        ]
+        for helper_name in required_helpers:
+            self.assertTrue(hasattr(grade_logic, helper_name), f"缺少 {helper_name}")
+
+        math_context = grade_logic.build_full_score_context_key(b"workbook-a", "成绩表")
+        other_sheet_context = grade_logic.build_full_score_context_key(b"workbook-a", "第二学期")
+        other_file_context = grade_logic.build_full_score_context_key(b"workbook-b", "成绩表")
+        settings = {}
+
+        self.assertEqual(grade_logic.get_column_full_score(settings, math_context, "数学"), 120.0)
+        grade_logic.set_column_full_score(settings, math_context, "数学", 125)
+        self.assertEqual(grade_logic.get_column_full_score(settings, math_context, "总分"), 800.0)
+        grade_logic.set_column_full_score(settings, math_context, "总分", 850)
+
+        self.assertEqual(grade_logic.get_column_full_score(settings, math_context, "数学"), 125.0)
+        self.assertEqual(grade_logic.get_column_full_score(settings, math_context, "总分"), 850.0)
+        self.assertEqual(grade_logic.get_column_full_score(settings, other_sheet_context, "数学"), 120.0)
+        self.assertEqual(grade_logic.get_column_full_score(settings, other_file_context, "数学"), 120.0)
+        self.assertNotEqual(math_context, other_sheet_context)
+        self.assertNotEqual(math_context, other_file_context)
+        self.assertEqual(grade_logic.suggest_full_score("未知成绩列"), 100.0)
+        self.assertEqual(grade_logic.suggest_full_score("语文成绩"), 120.0)
+        self.assertEqual(
+            grade_logic.get_total_score_notice("期末总成绩"),
+            "当前选择的是总分列，请确认总分满分，避免有效成绩被错误过滤。",
+        )
+        self.assertIsNone(grade_logic.get_total_score_notice("数学"))
+
     def test_analyze_scores_builds_summary_and_lists(self):
         result = analyze_scores({"Alice": 95, "Bob": 82, "Cindy": 76, "Dan": 58})
 

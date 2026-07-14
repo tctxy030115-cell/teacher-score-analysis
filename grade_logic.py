@@ -1,3 +1,4 @@
+import hashlib
 from io import BytesIO
 
 import pandas as pd
@@ -6,8 +7,24 @@ from openpyxl.styles import Alignment, Border, Font, Side
 
 
 NAME_COLUMN_ALIASES = ["姓名", "学生姓名", "名字", "姓名列"]
-SCORE_COLUMN_ALIASES = ["分数", "成绩", "数学", "语文", "英语", "物理", "化学", "道法", "历史", "地理", "生物", "总分"]
+SUBJECT_COLUMN_ALIASES = [
+    "数学",
+    "语文",
+    "英语",
+    "物理",
+    "化学",
+    "道法",
+    "历史",
+    "地理",
+    "生物",
+    "政治",
+    "体育",
+    "信息技术",
+]
+SCORE_COLUMN_ALIASES = ["分数", "成绩", *SUBJECT_COLUMN_ALIASES, "总分"]
 CLASS_COLUMN_ALIASES = ["班级", "班别", "行政班", "班级名称"]
+TOTAL_SCORE_KEYWORDS = ("总分", "总成绩", "合计")
+FULL_SCORE_NOTICE = "当前选择的是总分列，请确认总分满分，避免有效成绩被错误过滤。"
 
 
 def clean_column_name(column_name):
@@ -20,6 +37,44 @@ def clean_dataframe_columns(dataframe):
     cleaned = dataframe.copy()
     cleaned.columns = [clean_column_name(column) for column in cleaned.columns]
     return cleaned
+
+
+def is_total_score_column(column_name):
+    cleaned_name = clean_column_name(column_name)
+    return any(keyword in cleaned_name for keyword in TOTAL_SCORE_KEYWORDS)
+
+
+def suggest_full_score(column_name):
+    cleaned_name = clean_column_name(column_name)
+    if is_total_score_column(cleaned_name):
+        return 800.0
+    if any(subject in cleaned_name for subject in ("语文", "数学", "英语")):
+        return 120.0
+    return 100.0
+
+
+def get_total_score_notice(column_name):
+    if is_total_score_column(column_name):
+        return FULL_SCORE_NOTICE
+    return None
+
+
+def build_full_score_context_key(file_content, sheet_name):
+    file_fingerprint = hashlib.sha256(file_content).hexdigest()
+    return f"{file_fingerprint}:{clean_column_name(sheet_name)}"
+
+
+def get_column_full_score(settings, context_key, column_name):
+    context_settings = settings.setdefault(context_key, {})
+    cleaned_name = clean_column_name(column_name)
+    if cleaned_name not in context_settings:
+        context_settings[cleaned_name] = suggest_full_score(cleaned_name)
+    return float(context_settings[cleaned_name])
+
+
+def set_column_full_score(settings, context_key, column_name, full_score):
+    context_settings = settings.setdefault(context_key, {})
+    context_settings[clean_column_name(column_name)] = float(full_score)
 
 
 def find_first_matching_column(columns, aliases):
