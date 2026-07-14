@@ -15,6 +15,25 @@ from chart_logic import (
 
 
 class ChartLogicTest(unittest.TestCase):
+    def test_subject_averages_recognize_suffixed_subjects_but_exclude_total_and_descriptions(self):
+        dataframe = pd.DataFrame(
+            {
+                "姓名": ["甲", "乙"],
+                "语文分数": [100, 80],
+                "数学成绩": [120, 100],
+                "英语得分": [110, 90],
+                "总分分数": [330, 270],
+                "班级分数线": [300, 300],
+                "年级平均分": [305, 305],
+            }
+        )
+
+        result = calculate_subject_averages(dataframe)
+
+        self.assertEqual(result["科目"].tolist(), ["语文分数", "数学成绩", "英语得分"])
+        self.assertEqual(result["平均分"].tolist(), [90.0, 110.0, 100.0])
+        self.assertEqual(result["有效人数"].tolist(), [2, 2, 2])
+
     def test_current_column_full_score_filters_math_but_keeps_total_scores(self):
         math_scores = clean_score_series(pd.Series([119, 120, 121]), full_score=120)
         total_scores = clean_score_series(pd.Series([500, 600, 700, 801]), full_score=800)

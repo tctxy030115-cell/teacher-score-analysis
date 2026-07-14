@@ -14,7 +14,6 @@ from chart_logic import (
 from grade_logic import (
     CLASS_COLUMN_ALIASES,
     NAME_COLUMN_ALIASES,
-    SCORE_COLUMN_ALIASES,
     analyze_scores,
     build_full_score_context_key,
     build_class_options,
@@ -23,6 +22,7 @@ from grade_logic import (
     detect_header_row,
     export_score_result_to_bytes,
     find_first_matching_column,
+    find_first_matching_score_column,
     format_class_value,
     get_column_full_score,
     get_total_score_notice,
@@ -227,7 +227,7 @@ if uploaded_file:
             st.stop()
 
         matched_name_col = find_first_matching_column(columns, NAME_COLUMN_ALIASES)
-        matched_score_col = find_first_matching_column(columns, SCORE_COLUMN_ALIASES)
+        matched_score_col = find_first_matching_score_column(columns)
         matched_class_col = find_first_matching_column(columns, CLASS_COLUMN_ALIASES)
 
         name_default_index = pick_column_index(columns, matched_name_col, 0)

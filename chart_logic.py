@@ -1,7 +1,12 @@
 import pandas as pd
 import plotly.graph_objects as go
 
-from grade_logic import SUBJECT_COLUMN_ALIASES, clean_column_name, normalize_excellent_percent
+from grade_logic import (
+    SUBJECT_COLUMN_ALIASES,
+    clean_column_name,
+    normalize_excellent_percent,
+    normalize_score_column_name,
+)
 
 
 LEVEL_NAMES = ["待提升", "及格", "中等", "良好", "优秀"]
@@ -147,8 +152,9 @@ def calculate_subject_averages(dataframe, full_score=100):
     rows = []
     recognized_subjects = set(SUBJECT_COLUMN_ALIASES)
     for column in dataframe.columns:
-        subject = clean_column_name(column)
-        if subject not in recognized_subjects:
+        original_subject = clean_column_name(column)
+        normalized_subject = normalize_score_column_name(column)
+        if normalized_subject not in recognized_subjects:
             continue
         # 多科图比较原始平均分，只排除空值、非数字和负数；当前分析列满分不适用于其他科目。
         scores = pd.to_numeric(dataframe[column], errors="coerce")
@@ -157,7 +163,7 @@ def calculate_subject_averages(dataframe, full_score=100):
             continue
         rows.append(
             {
-                "科目": subject,
+                "科目": original_subject,
                 "平均分": round(float(scores.mean()), 1),
                 "有效人数": len(scores),
             }
