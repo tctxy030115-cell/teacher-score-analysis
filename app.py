@@ -30,6 +30,11 @@ from grade_logic import (
     normalize_excellent_percent,
     set_column_full_score,
 )
+from report_logic import (
+    ReportGenerationError,
+    build_score_report_bytes,
+    safe_report_filename,
+)
 
 
 st.set_page_config(
@@ -377,6 +382,8 @@ if uploaded_file:
             (valid_names != "") & (valid_names.str.lower() != "nan")
         ].copy()
         subject_averages = calculate_subject_averages(subject_source)
+        distribution_figure = build_distribution_figure(distribution)
+        level_figure = build_level_donut_figure(distribution)
         chart_config = {"displayModeBar": False, "displaylogo": False}
 
         with st.container(border=True):
@@ -384,13 +391,13 @@ if uploaded_file:
             distribution_column, level_column = st.columns(2)
             with distribution_column:
                 st.plotly_chart(
-                    build_distribution_figure(distribution),
+                    distribution_figure,
                     use_container_width=True,
                     config=chart_config,
                 )
             with level_column:
                 st.plotly_chart(
-                    build_level_donut_figure(distribution),
+                    level_figure,
                     use_container_width=True,
                     config=chart_config,
                 )
@@ -453,6 +460,67 @@ if uploaded_file:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
+            st.divider()
+            st.markdown("#### 📄 Word 成绩分析报告")
+            school_name = st.text_input("学校名称", key="word_report_school_name")
+            exam_name = st.text_input("考试名称", key="word_report_exam_name")
+            st.text_input("当前班级", value=selected_class, disabled=True)
+            st.text_input("当前分析科目", value=score_col, disabled=True)
+
+            report_signature = (
+                score_context_key,
+                int(header_row_number),
+                name_col,
+                class_col,
+                selected_class,
+                score_col,
+                float(full_score),
+                float(effective_excellent_percent),
+                school_name,
+                exam_name,
+            )
+            if st.session_state.get("word_report_signature") != report_signature:
+                st.session_state.pop("word_report_bytes", None)
+                st.session_state.pop("word_report_filename", None)
+                st.session_state.pop("word_report_signature", None)
+
+            if st.button("生成 Word 报告", use_container_width=True):
+                try:
+                    report_bytes = build_score_report_bytes(
+                        analysis_result=analysis_result,
+                        excellent_df=excellent_df,
+                        fail_df=fail_df,
+                        distribution_figure=distribution_figure,
+                        level_figure=level_figure,
+                        selected_class=selected_class,
+                        score_col=score_col,
+                        full_score=full_score,
+                        school_name=school_name,
+                        exam_name=exam_name,
+                    )
+                    st.session_state["word_report_bytes"] = report_bytes
+                    st.session_state["word_report_filename"] = safe_report_filename(
+                        school_name=school_name,
+                        class_name=selected_class,
+                        subject_name=score_col,
+                        exam_name=exam_name,
+                    )
+                    st.session_state["word_report_signature"] = report_signature
+                except ReportGenerationError as exc:
+                    st.error(str(exc))
+
+            if st.session_state.get("word_report_signature") == report_signature:
+                report_bytes = st.session_state.get("word_report_bytes")
+                if report_bytes:
+                    st.success("Word 报告生成成功，可点击下方按钮下载。")
+                    st.download_button(
+                        "下载 Word 成绩分析报告",
+                        data=report_bytes,
+                        file_name=st.session_state["word_report_filename"],
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                    )
 
     except Exception as e:
         st.error(f"读取 Excel 失败：{e}")
