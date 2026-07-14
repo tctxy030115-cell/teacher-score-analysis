@@ -2,3 +2,6 @@ streamlit
 pandas
 openpyxl
 plotly
+python-docx>=1.1,<2
+docxtpl>=0.20,<1
+kaleido>=1,<2
