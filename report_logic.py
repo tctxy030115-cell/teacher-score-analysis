@@ -47,12 +47,14 @@ def _format_student_list(students: pd.DataFrame, empty_message: str) -> str:
 def _build_summary_text(analysis_result: dict, selected_class: str, score_col: str, full_score: float) -> str:
     return (
         f"本次{selected_class}的{score_col}分析共覆盖 {analysis_result['student_count']} 名参考学生，"
+        f"当前报告中的数据与网页分析结果保持一致。\n"
         f"平均分为 {_format_score(analysis_result['average_score'])} 分，"
         f"最高分为 {_format_score(analysis_result['highest_score'])} 分，"
-        f"最低分为 {_format_score(analysis_result['lowest_score'])} 分。"
-        f"当前分析列满分为 {_format_score(full_score)} 分，"
+        f"最低分为 {_format_score(analysis_result['lowest_score'])} 分，"
+        f"当前分析列满分为 {_format_score(full_score)} 分。\n"
         f"及格率为 {_format_rate(analysis_result['pass_rate'])}，"
-        f"优秀率为 {_format_rate(analysis_result['excellent_rate'])}。"
+        f"优秀率为 {_format_rate(analysis_result['excellent_rate'])}；"
+        "具体成绩分布与等级结构见后续图表。"
     )
 
 
@@ -126,8 +128,8 @@ def _export_chart_images(distribution_figure: object, level_figure: object, outp
     distribution_path = output_dir / "distribution.png"
     level_path = output_dir / "level.png"
     try:
-        distribution_figure.write_image(distribution_path, format="png", width=1200, height=650, scale=2)
-        level_figure.write_image(level_path, format="png", width=1000, height=650, scale=2)
+        distribution_figure.write_image(distribution_path, format="png", width=1000, height=760, scale=2)
+        level_figure.write_image(level_path, format="png", width=1000, height=800, scale=2)
     except Exception as exc:
         LOGGER.exception("Word report chart export failed: %s", exc)
         raise ReportGenerationError("Word 报告图表生成失败，请稍后重试或联系管理员。") from exc
@@ -184,9 +186,9 @@ def build_score_report_bytes(
         )
         try:
             template = DocxTemplate(template_file)
-            # 165 mm is within the existing A4 template's 1.25-inch side margins.
-            context["distribution_chart"] = InlineImage(template, str(distribution_path), width=Mm(165))
-            context["level_chart"] = InlineImage(template, str(level_path), width=Mm(165))
+            # 模板正文宽度为 166 mm；保留安全边距并让两张图按原比例缩放。
+            context["distribution_chart"] = InlineImage(template, str(distribution_path), width=Mm(158))
+            context["level_chart"] = InlineImage(template, str(level_path), width=Mm(158))
             template.render(context, autoescape=True)
             output = BytesIO()
             template.save(output)
