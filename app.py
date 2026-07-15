@@ -35,6 +35,15 @@ from report_logic import (
     build_score_report_bytes,
     safe_report_filename,
 )
+from ui_components import (
+    inject_global_styles,
+    render_anchor,
+    render_metric_grid,
+    render_page_header,
+    render_section_header,
+    render_sidebar,
+    style_dashboard_figure,
+)
 
 
 st.set_page_config(
@@ -43,97 +52,9 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: #f6f8fb;
-    }
-
-    .block-container {
-        max-width: 1180px;
-        padding-top: 2rem;
-        padding-bottom: 2.5rem;
-    }
-
-    .page-header {
-        background: #ffffff;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 1.2rem 1.4rem;
-        margin-bottom: 1rem;
-    }
-
-    .page-title {
-        color: #1f2937;
-        font-size: 2rem;
-        font-weight: 700;
-        line-height: 1.25;
-        margin: 0 0 .35rem 0;
-    }
-
-    .page-caption {
-        color: #64748b;
-        font-size: 1rem;
-        margin: 0;
-    }
-
-    .section-label {
-        color: #1f2937;
-        font-size: 1.1rem;
-        font-weight: 700;
-        margin: .2rem 0 .6rem 0;
-    }
-
-    .section-note {
-        color: #64748b;
-        font-size: .92rem;
-        margin: -.2rem 0 .75rem 0;
-    }
-
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background: #ffffff;
-    }
-
-    .stButton button,
-    .stDownloadButton button {
-        border-radius: 8px;
-        border: 1px solid #cbd5e1;
-        background: #ffffff;
-        color: #1f2937;
-        font-weight: 600;
-    }
-
-    .stButton button:hover,
-    .stDownloadButton button:hover {
-        border-color: #2563eb;
-        color: #1d4ed8;
-    }
-
-    @media (max-width: 720px) {
-        .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-
-        .page-title {
-            font-size: 1.55rem;
-        }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-    <div class="page-header">
-        <div class="page-title">📊 成绩分析工具</div>
-        <p class="page-caption">上传 Excel，自动生成基础成绩分析。</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+inject_global_styles()
+render_sidebar()
+render_page_header()
 
 
 def pick_column_index(columns, matched_column, fallback_index=0):
@@ -153,8 +74,13 @@ def pick_default_class_index(class_options):
     return 0
 
 
+render_anchor("data-import")
 with st.container(border=True):
-    st.markdown('<div class="section-label">📁 文件操作</div>', unsafe_allow_html=True)
+    render_section_header(
+        "上传并开始分析",
+        "入",
+        "依次完成 Excel 上传、工作表选择和字段确认，分析结果会自动显示在下方。",
+    )
     uploaded_file = st.file_uploader(
         "上传 Excel 成绩表",
         type=["xlsx", "xls"],
@@ -199,7 +125,7 @@ if uploaded_file:
         default_header_row = detected_header_row + 1 if detected_header_row is not None else 1
 
         with st.container(border=True):
-            st.markdown('<div class="section-label">🧭 表头设置</div>', unsafe_allow_html=True)
+            render_section_header("表头设置", "表")
             if detected_header_row is not None:
                 st.success(f"已自动识别第 {default_header_row} 行为表头。")
             else:
@@ -216,8 +142,8 @@ if uploaded_file:
         df = build_dataframe_from_header(raw_df, int(header_row_number) - 1)
 
         with st.container(border=True):
-            st.markdown('<div class="section-label">📋 原始成绩预览</div>', unsafe_allow_html=True)
-            st.dataframe(df, use_container_width=True)
+            render_section_header("原始成绩预览", "览", "用于核对表头与字段，原始 Excel 不会被修改。")
+            st.dataframe(df, width="stretch", height=280)
 
         if df.empty:
             st.error("表头下方没有可分析的数据。")
@@ -240,7 +166,7 @@ if uploaded_file:
         class_default_index = pick_column_index(columns, matched_class_col, 0)
 
         with st.container(border=True):
-            st.markdown('<div class="section-label">✅ 选择分析对象</div>', unsafe_allow_html=True)
+            render_section_header("选择分析对象", "选")
             st.markdown(
                 '<p class="section-note">先确认姓名列和班级范围，再选择要分析的科目或成绩列。</p>',
                 unsafe_allow_html=True,
@@ -276,7 +202,7 @@ if uploaded_file:
                 )
 
         with st.container(border=True):
-            st.markdown('<div class="section-label">📐 评价标准</div>', unsafe_allow_html=True)
+            render_section_header("评价标准", "标")
             st.markdown(
                 '<p class="section-note">默认规则：优秀≥满分的90%，良好≥80%，及格≥60%。请确认当前分析列满分。</p>',
                 unsafe_allow_html=True,
@@ -346,7 +272,7 @@ if uploaded_file:
 
         if valid_scores.empty:
             with st.container(border=True):
-                st.markdown('<div class="section-label">📊 成绩可视化分析</div>', unsafe_allow_html=True)
+                render_section_header("成绩可视化分析", "图")
                 st.info("当前筛选条件下没有可用于分析的有效成绩。")
             st.stop()
 
@@ -359,18 +285,10 @@ if uploaded_file:
             current_subject=score_col,
         )
 
+        render_anchor("core-statistics")
         with st.container(border=True):
-            st.markdown('<div class="section-label">📊 基础统计</div>', unsafe_allow_html=True)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("参考人数", analysis_result["student_count"])
-            c2.metric("平均分", f"{analysis_result['average_score']:.2f}")
-            c3.metric("最高分", f"{analysis_result['highest_score']:.0f}")
-            c4.metric("最低分", f"{analysis_result['lowest_score']:.0f}")
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("优秀学生", analysis_result["excellent_count"])
-            c6.metric("不及格人数", analysis_result["fail_count"])
-            c7.metric("及格率", f"{analysis_result['pass_rate']:.1f}%")
-            c8.metric("优秀率", f"{analysis_result['excellent_rate']:.1f}%")
+            render_section_header("核心统计", "统", "当前班级与分析科目的关键成绩指标。")
+            render_metric_grid(analysis_result)
 
         distribution = calculate_score_distribution(
             valid_scores["分数"],
@@ -384,30 +302,42 @@ if uploaded_file:
         subject_averages = calculate_subject_averages(subject_source)
         distribution_figure = build_distribution_figure(distribution)
         level_figure = build_level_donut_figure(distribution)
+        style_dashboard_figure(distribution_figure, height=390)
+        style_dashboard_figure(level_figure, height=390)
         chart_config = {"displayModeBar": False, "displaylogo": False}
 
+        render_anchor("score-distribution")
         with st.container(border=True):
-            st.markdown('<div class="section-label">📊 成绩可视化分析</div>', unsafe_allow_html=True)
+            render_section_header("成绩分布与等级占比", "分", "展示当前分析列的分数区间和等级结构。")
             distribution_column, level_column = st.columns(2)
             with distribution_column:
                 st.plotly_chart(
                     distribution_figure,
-                    use_container_width=True,
+                    width="stretch",
                     config=chart_config,
                 )
             with level_column:
                 st.plotly_chart(
                     level_figure,
-                    use_container_width=True,
+                    width="stretch",
                     config=chart_config,
                 )
 
+        render_anchor("subject-analysis")
+        with st.container(border=True):
+            render_section_header(
+                "各科平均分",
+                "科",
+                "按原始平均分展示；不同满分科目暂不适合直接比较得分高低。",
+            )
             if subject_averages.empty:
                 st.info("当前未识别到两个及以上有效科目。")
             else:
+                subject_average_figure = build_subject_average_figure(subject_averages)
+                style_dashboard_figure(subject_average_figure, height=400)
                 st.plotly_chart(
-                    build_subject_average_figure(subject_averages),
-                    use_container_width=True,
+                    subject_average_figure,
+                    width="stretch",
                     config=chart_config,
                 )
 
@@ -430,39 +360,50 @@ if uploaded_file:
         )
 
         with st.container(border=True):
-            st.markdown('<div class="section-label">📄 完整成绩明细</div>', unsafe_allow_html=True)
-            st.dataframe(detail_df, use_container_width=True)
+            render_section_header("完整成绩明细", "明", "当前筛选条件下的有效成绩与等级。")
+            st.dataframe(detail_df, width="stretch")
 
+        render_anchor("excellent-list")
         left, right = st.columns(2)
         with left:
             with st.container(border=True):
-                st.markdown('<div class="section-label">🌟 优秀名单</div>', unsafe_allow_html=True)
+                render_section_header("优秀名单", "优")
                 if excellent_df.empty:
                     st.info("本次没有优秀学生。")
                 else:
-                    st.dataframe(excellent_df, use_container_width=True)
+                    st.dataframe(excellent_df, width="stretch")
 
         with right:
+            render_anchor("improve-list")
             with st.container(border=True):
-                st.markdown('<div class="section-label">⚠️ 不及格名单</div>', unsafe_allow_html=True)
+                render_section_header("待提升名单", "升")
                 if fail_df.empty:
-                    st.info("本次没有不及格学生。")
+                    st.info("本次暂无待提升学生。")
                 else:
-                    st.dataframe(fail_df, use_container_width=True)
+                    st.dataframe(fail_df, width="stretch")
 
         excel_file = export_score_result_to_bytes(analysis_result)
+        render_anchor("export-center")
         with st.container(border=True):
-            st.markdown('<div class="section-label">📤 导出结果</div>', unsafe_allow_html=True)
+            render_section_header("导出中心", "出", "下载 Excel 数据结果，或生成包含当前图表的 Word 分析报告。")
+            st.markdown(
+                '<div class="export-subsection"><h3 class="export-subtitle">Excel 数据结果</h3>'
+                '<p class="export-description">保留现有成绩分析导出格式。</p></div>',
+                unsafe_allow_html=True,
+            )
             st.download_button(
                 "下载完整成绩分析 Excel",
                 data=excel_file,
                 file_name="学生成绩统计结果.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                    width="stretch",
             )
 
-            st.divider()
-            st.markdown("#### 📄 Word 成绩分析报告")
+            st.markdown(
+                '<div class="export-subsection"><h3 class="export-subtitle">Word 成绩分析报告</h3>'
+                '<p class="export-description">填写报告信息后，使用当前统计、名单和图表生成报告。</p></div>',
+                unsafe_allow_html=True,
+            )
             school_name = st.text_input("学校名称", key="word_report_school_name")
             exam_name = st.text_input("考试名称", key="word_report_exam_name")
             st.text_input("当前班级", value=selected_class, disabled=True)
@@ -485,12 +426,13 @@ if uploaded_file:
                 st.session_state.pop("word_report_filename", None)
                 st.session_state.pop("word_report_signature", None)
 
-            if st.button("生成 Word 报告", use_container_width=True):
+            if st.button("生成 Word 报告", type="primary", width="stretch"):
                 try:
                     report_bytes = build_score_report_bytes(
                         analysis_result=analysis_result,
                         excellent_df=excellent_df,
                         fail_df=fail_df,
+                        distribution=distribution,
                         distribution_figure=distribution_figure,
                         level_figure=level_figure,
                         selected_class=selected_class,
@@ -519,7 +461,7 @@ if uploaded_file:
                         data=report_bytes,
                         file_name=st.session_state["word_report_filename"],
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
+                    width="stretch",
                     )
 
     except Exception as e:
