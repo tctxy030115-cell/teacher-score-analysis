@@ -432,6 +432,7 @@ if uploaded_file:
                         analysis_result=analysis_result,
                         excellent_df=excellent_df,
                         fail_df=fail_df,
+                        distribution=distribution,
                         distribution_figure=distribution_figure,
                         level_figure=level_figure,
                         selected_class=selected_class,
