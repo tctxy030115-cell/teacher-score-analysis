@@ -7,9 +7,11 @@ import re
 
 import streamlit as st
 
+from chart_logic import PLOTLY_FONT_FAMILY, apply_plotly_font_family
+
 
 _ANCHOR_PATTERN = re.compile(r"[^a-z0-9-]+")
-_FONT_FAMILY = "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Arial, sans-serif"
+_FONT_FAMILY = PLOTLY_FONT_FAMILY
 
 
 def inject_global_styles() -> None:
@@ -511,4 +513,4 @@ def style_dashboard_figure(figure, *, height: int):
                     "line": {"color": "#FFFFFF", "width": 2},
                 }
             )
-    return figure
+    return apply_plotly_font_family(figure)

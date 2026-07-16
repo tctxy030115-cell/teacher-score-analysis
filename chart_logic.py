@@ -11,6 +11,9 @@ from grade_logic import (
 
 LEVEL_NAMES = ["待提升", "及格", "中等", "良好", "优秀"]
 LEVEL_COLORS = ["#94a3b8", "#7c8da6", "#6f8fa8", "#5f8299", "#4f7288"]
+PLOTLY_FONT_FAMILY = (
+    "Noto Sans CJK SC, Microsoft YaHei, PingFang SC, SimHei, Arial, sans-serif"
+)
 INVALID_REASON_ORDER = (
     "姓名为空",
     "分数为空或非数字",
@@ -175,12 +178,32 @@ def calculate_subject_averages(dataframe, full_score=100):
     return result
 
 
+def apply_plotly_font_family(figure):
+    """为 Plotly 中所有可见文字显式应用跨平台中文字体回退链。"""
+    figure.update_layout(
+        font={"family": PLOTLY_FONT_FAMILY},
+        title={"font": {"family": PLOTLY_FONT_FAMILY}},
+        legend={"font": {"family": PLOTLY_FONT_FAMILY}},
+    )
+    figure.update_xaxes(
+        tickfont={"family": PLOTLY_FONT_FAMILY},
+        title_font={"family": PLOTLY_FONT_FAMILY},
+    )
+    figure.update_yaxes(
+        tickfont={"family": PLOTLY_FONT_FAMILY},
+        title_font={"family": PLOTLY_FONT_FAMILY},
+    )
+    figure.update_traces(textfont={"family": PLOTLY_FONT_FAMILY})
+    figure.update_annotations(font={"family": PLOTLY_FONT_FAMILY})
+    return figure
+
+
 def _apply_common_layout(figure, title, height=360):
     figure.update_layout(
         title={"text": title, "x": 0.02, "xanchor": "left"},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font={"color": "#334155", "family": "Arial, sans-serif"},
+        font={"color": "#334155", "family": PLOTLY_FONT_FAMILY},
         margin={"l": 42, "r": 24, "t": 58, "b": 42},
         height=height,
         hoverlabel={"bgcolor": "#ffffff", "font_color": "#334155"},
@@ -217,7 +240,7 @@ def build_distribution_figure(distribution):
             text=f"平均分：{average:.1f}",
             font={"color": "#64748b", "size": 13},
         )
-    return figure
+    return apply_plotly_font_family(figure)
 
 
 def build_level_donut_figure(distribution):
@@ -246,7 +269,7 @@ def build_level_donut_figure(distribution):
             }
         ],
     )
-    return figure
+    return apply_plotly_font_family(figure)
 
 
 def build_subject_average_figure(subject_averages):
@@ -265,4 +288,4 @@ def build_subject_average_figure(subject_averages):
     _apply_common_layout(figure, "各科平均分对比", height=380)
     figure.update_xaxes(title_text="科目", showgrid=False)
     figure.update_yaxes(title_text="平均分", rangemode="tozero", gridcolor="#e2e8f0")
-    return figure
+    return apply_plotly_font_family(figure)
