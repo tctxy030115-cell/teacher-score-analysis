@@ -240,6 +240,43 @@ class ChartLogicTest(unittest.TestCase):
         self.assertAlmostEqual(donut_figure.data[0].hole, 0.58)
         self.assertEqual(subject_figure.data[0].texttemplate, "%{y:.1f}")
 
+    def test_all_figure_text_uses_cross_platform_chinese_font_fallback(self):
+        distribution = calculate_score_distribution(
+            pd.Series([59, 60, 70, 80, 90]),
+            full_score=100,
+        )
+        subject_averages = pd.DataFrame(
+            {"科目": ["语文", "数学"], "平均分": [82.5, 88.0], "有效人数": [2, 2]}
+        )
+        figures = (
+            build_distribution_figure(distribution),
+            build_level_donut_figure(distribution),
+            build_subject_average_figure(subject_averages),
+        )
+
+        for figure in figures:
+            font_families = [
+                figure.layout.font.family,
+                figure.layout.title.font.family,
+                figure.layout.legend.font.family,
+                *(trace.textfont.family for trace in figure.data),
+                *(annotation.font.family for annotation in figure.layout.annotations),
+            ]
+            if figure.data[0].type == "bar":
+                font_families.extend(
+                    [
+                        figure.layout.xaxis.tickfont.family,
+                        figure.layout.xaxis.title.font.family,
+                        figure.layout.yaxis.tickfont.family,
+                        figure.layout.yaxis.title.font.family,
+                    ]
+                )
+
+            for family in font_families:
+                self.assertIsNotNone(family)
+                self.assertIn("Noto Sans CJK SC", family)
+                self.assertNotEqual(family, "Microsoft YaHei")
+
 
 if __name__ == "__main__":
     unittest.main()
