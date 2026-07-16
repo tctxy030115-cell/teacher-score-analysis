@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime
 from io import BytesIO
 import logging
 from pathlib import Path
@@ -20,6 +20,59 @@ from grade_logic import is_total_score_column
 LOGGER = logging.getLogger(__name__)
 DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "score_report_template.docx"
 _ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]+')
+REPORT_LIST_LIMIT = 10
+SUBJECT_AVERAGE_FALLBACK = "当前数据仅识别到一个有效成绩科目，暂无各科平均分对比。"
+TEMPLATE_CONTEXT_VARIABLES = frozenset(
+    {
+        "school_name",
+        "exam_name",
+        "class_name",
+        "subject_name",
+        "generated_at",
+        "student_count",
+        "average_score",
+        "highest_score",
+        "lowest_score",
+        "pass_rate",
+        "excellent_rate",
+        "summary_text",
+        "distribution_analysis",
+        "level_analysis",
+        "distribution_chart",
+        "level_chart",
+        "subject_average_chart",
+        "subject_average_fallback",
+        "excellent_total_count",
+        "excellent_display_students",
+        "excellent_omitted_count",
+        "struggling_total_count",
+        "struggling_display_students",
+        "struggling_omitted_count",
+        "teaching_suggestions",
+        "data_note",
+    }
+)
+REQUIRED_TEXT_TEMPLATE_VARIABLES = frozenset(
+    {
+        "school_name",
+        "exam_name",
+        "class_name",
+        "subject_name",
+        "generated_at",
+        "student_count",
+        "average_score",
+        "highest_score",
+        "lowest_score",
+        "pass_rate",
+        "excellent_rate",
+        "summary_text",
+        "distribution_analysis",
+        "level_analysis",
+        "subject_average_fallback",
+        "teaching_suggestions",
+        "data_note",
+    }
+)
 
 
 class ReportGenerationError(RuntimeError):
@@ -36,14 +89,50 @@ def _format_rate(value: object) -> str:
     return f"{float(value):.1f}%"
 
 
-def _format_student_list(students: pd.DataFrame, empty_message: str) -> str:
+def _build_student_display(
+    students: pd.DataFrame,
+    *,
+    descending: bool,
+    empty_message: str,
+) -> tuple[int, list[dict[str, str]], int]:
+    """生成 Word 摘要名单，不修改页面或 Excel 使用的原始 DataFrame。"""
     if students is None or students.empty:
-        return empty_message
+        return 0, [{"name": empty_message, "score": ""}], 0
 
-    return "\n".join(
-        f"{row['姓名']}：{_format_score(row['分数'])} 分"
-        for _, row in students.iterrows()
+    rows = students.loc[:, ["姓名", "分数"]].copy(deep=True)
+    rows["__numeric_score"] = pd.to_numeric(rows["分数"], errors="coerce")
+    rows = rows.sort_values(
+        "__numeric_score",
+        ascending=not descending,
+        na_position="last",
+        kind="stable",
     )
+    total_count = len(rows)
+    display_rows = [
+        {"name": str(row["姓名"]), "score": _format_score(row["分数"])}
+        for _, row in rows.head(REPORT_LIST_LIMIT).iterrows()
+    ]
+    return total_count, display_rows, max(0, total_count - len(display_rows))
+
+
+def _pad_student_displays(
+    excellent_students: list[dict[str, str]],
+    struggling_students: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """让模板可用同一循环稳定渲染四列表格。"""
+    row_count = max(len(excellent_students), len(struggling_students), 1)
+    blank = {"name": "", "score": ""}
+    return (
+        excellent_students + [blank.copy() for _ in range(row_count - len(excellent_students))],
+        struggling_students + [blank.copy() for _ in range(row_count - len(struggling_students))],
+    )
+
+
+def _format_generated_at(value: str | None) -> str:
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    now = datetime.now()
+    return f"{now.year}年{now.month}月{now.day}日 {now:%H:%M}"
 
 
 def _build_summary_text(
@@ -303,20 +392,42 @@ def build_report_context(
     full_score: float,
     school_name: str,
     exam_name: str,
+    generated_at: str | None = None,
     report_date: str | None = None,
 ) -> dict:
     """构建报告文字上下文；仅使用页面已经得出的统计和名单。"""
-    class_name = str(selected_class).strip() or "全部班级"
+    class_name = str(selected_class).strip() or "全部学生"
     subject_name = str(score_col).strip() or "未填写"
     school_display = str(school_name).strip() or "未填写"
     exam_display = str(exam_name).strip() or "成绩分析"
+    excellent_total, excellent_display, excellent_omitted = _build_student_display(
+        excellent_df,
+        descending=True,
+        empty_message="暂无优秀学生",
+    )
+    struggling_total, struggling_display, struggling_omitted = _build_student_display(
+        fail_df,
+        descending=False,
+        empty_message="暂无待提升学生",
+    )
+    excellent_display, struggling_display = _pad_student_displays(
+        excellent_display,
+        struggling_display,
+    )
+    excellent_percent = float(analysis_result.get("excellent_percent", 90))
+    data_note = (
+        f"当前分析范围为 {class_name}；当前科目或成绩列为{subject_name}；"
+        f"当前成绩列满分为 {_format_score(full_score)} 分；及格线为满分的 60%；"
+        f"优秀线为满分的 {_format_score(excellent_percent)}%；"
+        "Word 名单为摘要，最多展示前 10 人，完整名单请查看 Excel 导出。"
+    )
 
     return {
         "school_name": school_display,
         "exam_name": exam_display,
         "class_name": class_name,
         "subject_name": subject_name,
-        "report_date": report_date or date.today().isoformat(),
+        "generated_at": _format_generated_at(generated_at or report_date),
         "student_count": str(analysis_result["student_count"]),
         "average_score": f"{float(analysis_result['average_score']):.2f}",
         "highest_score": _format_score(analysis_result["highest_score"]),
@@ -326,9 +437,15 @@ def build_report_context(
         "summary_text": _build_summary_text(analysis_result, class_name, subject_name, full_score),
         "distribution_analysis": _build_distribution_analysis(distribution),
         "level_analysis": _build_level_analysis(distribution),
-        "excellent_students": _format_student_list(excellent_df, "暂无优秀学生"),
-        "struggling_students": _format_student_list(fail_df, "暂无待提升学生"),
+        "subject_average_fallback": SUBJECT_AVERAGE_FALLBACK,
+        "excellent_total_count": excellent_total,
+        "excellent_display_students": excellent_display,
+        "excellent_omitted_count": excellent_omitted,
+        "struggling_total_count": struggling_total,
+        "struggling_display_students": struggling_display,
+        "struggling_omitted_count": struggling_omitted,
         "teaching_suggestions": _build_teaching_suggestions(analysis_result, distribution, subject_name),
+        "data_note": data_note,
     }
 
 
@@ -343,7 +460,7 @@ def safe_report_filename(
 
     parts = [
         clean_part(school_name, "未填写"),
-        clean_part(class_name, "全部班级"),
+        clean_part(class_name, "全部学生"),
         clean_part(subject_name, "未填写"),
         clean_part(exam_name, "成绩分析"),
         "成绩分析报告",
@@ -351,17 +468,69 @@ def safe_report_filename(
     return "_".join(parts) + ".docx"
 
 
-def _export_chart_images(distribution_figure: object, level_figure: object, output_dir: Path) -> tuple[Path, Path]:
+def _export_chart_images(
+    distribution_figure: object,
+    level_figure: object,
+    subject_average_figure: object | None,
+    output_dir: Path,
+) -> tuple[Path, Path, Path | None]:
     """将页面已有的图表导出为临时 PNG，不在项目目录写入文件。"""
     distribution_path = output_dir / "distribution.png"
     level_path = output_dir / "level.png"
+    subject_average_path = output_dir / "subject-average.png"
     try:
-        distribution_figure.write_image(distribution_path, format="png", width=1000, height=760, scale=2)
-        level_figure.write_image(level_path, format="png", width=1000, height=800, scale=2)
+        distribution_figure.write_image(distribution_path, format="png", width=1000, height=700, scale=2)
+        level_figure.write_image(level_path, format="png", width=1000, height=650, scale=2)
+        if subject_average_figure is not None:
+            subject_average_figure.write_image(
+                subject_average_path,
+                format="png",
+                width=1000,
+                height=420,
+                scale=2,
+            )
     except Exception as exc:
         LOGGER.exception("Word report chart export failed: %s", exc)
         raise ReportGenerationError("Word 报告图表生成失败，请稍后重试或联系管理员。") from exc
-    return distribution_path, level_path
+    return (
+        distribution_path,
+        level_path,
+        subject_average_path if subject_average_figure is not None else None,
+    )
+
+
+def _validate_template_context(template: DocxTemplate, context: dict) -> None:
+    template_variables = set(template.get_undeclared_template_variables())
+    expected_variables = set(TEMPLATE_CONTEXT_VARIABLES)
+    if template_variables != expected_variables:
+        missing = sorted(expected_variables - template_variables)
+        unexpected = sorted(template_variables - expected_variables)
+        LOGGER.error(
+            "Word template variable contract mismatch: missing=%s unexpected=%s",
+            missing,
+            unexpected,
+        )
+        raise ReportGenerationError("Word 报告模板变量与代码不一致，请联系管理员。")
+
+    context_variables = set(context)
+    if context_variables != expected_variables:
+        missing = sorted(expected_variables - context_variables)
+        unexpected = sorted(context_variables - expected_variables)
+        LOGGER.error(
+            "Word report context mismatch: missing=%s unexpected=%s",
+            missing,
+            unexpected,
+        )
+        raise ReportGenerationError("Word 报告数据字段不完整，请联系管理员。")
+
+    empty_required = sorted(
+        key
+        for key in REQUIRED_TEXT_TEMPLATE_VARIABLES
+        if not str(context.get(key, "")).strip()
+    )
+    if empty_required:
+        LOGGER.error("Word report required text is empty: %s", empty_required)
+        raise ReportGenerationError("Word 报告存在空白必填内容，请联系管理员。")
 
 
 def _ensure_no_unrendered_placeholders(report_bytes: bytes) -> None:
@@ -389,6 +558,8 @@ def build_score_report_bytes(
     full_score: float,
     school_name: str,
     exam_name: str,
+    subject_average_figure: object | None = None,
+    generated_at: str | None = None,
     report_date: str | None = None,
     template_path: Path | None = None,
 ) -> bytes:
@@ -407,18 +578,36 @@ def build_score_report_bytes(
         full_score=full_score,
         school_name=school_name,
         exam_name=exam_name,
+        generated_at=generated_at,
         report_date=report_date,
     )
 
     with TemporaryDirectory(prefix="grade-report-") as temporary_dir:
-        distribution_path, level_path = _export_chart_images(
-            distribution_figure, level_figure, Path(temporary_dir)
+        distribution_path, level_path, subject_average_path = _export_chart_images(
+            distribution_figure,
+            level_figure,
+            subject_average_figure,
+            Path(temporary_dir),
         )
         try:
             template = DocxTemplate(template_file)
             # 模板正文宽度为 166 mm；保留安全边距并让两张图按原比例缩放。
-            context["distribution_chart"] = InlineImage(template, str(distribution_path), width=Mm(158))
-            context["level_chart"] = InlineImage(template, str(level_path), width=Mm(158))
+            context["distribution_chart"] = InlineImage(
+                template,
+                str(distribution_path),
+                width=Mm(152),
+            )
+            context["level_chart"] = InlineImage(
+                template,
+                str(level_path),
+                width=Mm(152),
+            )
+            context["subject_average_chart"] = (
+                InlineImage(template, str(subject_average_path), width=Mm(152))
+                if subject_average_path is not None
+                else None
+            )
+            _validate_template_context(template, context)
             template.render(context, autoescape=True)
             output = BytesIO()
             template.save(output)

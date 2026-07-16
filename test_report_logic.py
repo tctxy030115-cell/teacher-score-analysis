@@ -8,6 +8,8 @@ from zipfile import ZipFile
 import pandas as pd
 import plotly.graph_objects as go
 from docx import Document
+from docx.shared import Mm
+from docxtpl import DocxTemplate
 
 try:
     import report_logic
@@ -20,7 +22,7 @@ EXPECTED_TEMPLATE_PLACEHOLDERS = {
     "exam_name",
     "class_name",
     "subject_name",
-    "report_date",
+    "generated_at",
     "student_count",
     "average_score",
     "highest_score",
@@ -32,9 +34,16 @@ EXPECTED_TEMPLATE_PLACEHOLDERS = {
     "level_analysis",
     "distribution_chart",
     "level_chart",
-    "excellent_students",
-    "struggling_students",
+    "subject_average_chart",
+    "subject_average_fallback",
+    "excellent_total_count",
+    "excellent_display_students",
+    "excellent_omitted_count",
+    "struggling_total_count",
+    "struggling_display_students",
+    "struggling_omitted_count",
     "teaching_suggestions",
+    "data_note",
 }
 
 # 1×1 PNG：模板契约测试只验证图片替换和 DOCX 结构，不依赖 Kaleido/Chromium。
@@ -87,44 +96,153 @@ class ReportLogicTest(unittest.TestCase):
         self.require_report_logic()
 
         template = Document(report_logic.DEFAULT_TEMPLATE_PATH)
+        template_contract = DocxTemplate(report_logic.DEFAULT_TEMPLATE_PATH)
         page_break_count = len(
             template.element.body.xpath('.//w:br[@w:type="page"]')
         )
         table_shapes = {(len(table.rows), len(table.columns)) for table in template.tables}
-        atomic_placeholders = {
-            match.group(1)
+        jinja_expressions = [
+            match.group(0)
             for paragraph in self._all_paragraphs(template)
-            for run in paragraph.runs
-            for match in re.finditer(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", run.text)
-        }
+            for match in re.finditer(r"\{\{.*?\}\}|\{%.*?%\}", paragraph.text)
+        ]
 
         self.assertEqual(page_break_count, 4)
         self.assertIn((4, 3), table_shapes)
-        self.assertEqual(atomic_placeholders, EXPECTED_TEMPLATE_PLACEHOLDERS)
+        self.assertIn((4, 4), table_shapes)
+        self.assertEqual(
+            set(template_contract.get_undeclared_template_variables()),
+            EXPECTED_TEMPLATE_PLACEHOLDERS,
+        )
+        for expression in jinja_expressions:
+            self.assertTrue(
+                any(
+                    run.text.strip() == expression.strip()
+                    for paragraph in self._all_paragraphs(template)
+                    for run in paragraph.runs
+                ),
+                f"Jinja 表达式必须位于独立完整 Word run：{expression}",
+            )
+        self.assertEqual(
+            set(report_logic.TEMPLATE_CONTEXT_VARIABLES),
+            EXPECTED_TEMPLATE_PLACEHOLDERS,
+        )
+
+    def test_context_uses_generated_at_and_preserves_specific_or_all_student_scope(self):
+        self.require_report_logic()
+
+        specific_context = report_logic.build_report_context(
+            analysis_result=self.analysis_result,
+            excellent_df=self.excellent_df,
+            fail_df=self.fail_df,
+            distribution=self.distribution,
+            selected_class="2501",
+            score_col="数学",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+        all_students_context = report_logic.build_report_context(
+            analysis_result=self.analysis_result,
+            excellent_df=self.excellent_df,
+            fail_df=self.fail_df,
+            distribution=self.distribution,
+            selected_class="全部学生",
+            score_col="语文",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+
+        self.assertEqual(specific_context["class_name"], "2501")
+        self.assertEqual(all_students_context["class_name"], "全部学生")
+        self.assertEqual(specific_context["generated_at"], "2026年7月17日 00:35")
+        self.assertEqual(all_students_context["generated_at"], "2026年7月17日 00:35")
+
+    def test_student_lists_are_sorted_limited_and_do_not_mutate_page_data(self):
+        self.require_report_logic()
+        excellent_df = pd.DataFrame(
+            [[f"优{i:02d}", 80 + i] for i in range(12)],
+            columns=["姓名", "分数"],
+        )
+        fail_df = pd.DataFrame(
+            [[f"待{i:02d}", 59 - i] for i in range(13)],
+            columns=["姓名", "分数"],
+        )
+        original_excellent = excellent_df.copy(deep=True)
+        original_fail = fail_df.copy(deep=True)
+
+        context = report_logic.build_report_context(
+            analysis_result=self.analysis_result,
+            excellent_df=excellent_df,
+            fail_df=fail_df,
+            distribution=self.distribution,
+            selected_class="全部学生",
+            score_col="数学",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+
+        self.assertEqual(context["excellent_total_count"], 12)
+        self.assertEqual(context["excellent_omitted_count"], 2)
+        self.assertEqual(context["struggling_total_count"], 13)
+        self.assertEqual(context["struggling_omitted_count"], 3)
+        self.assertEqual(
+            [row["score"] for row in context["excellent_display_students"] if row["name"]],
+            ["91", "90", "89", "88", "87", "86", "85", "84", "83", "82"],
+        )
+        self.assertEqual(
+            [row["score"] for row in context["struggling_display_students"] if row["name"]],
+            ["47", "48", "49", "50", "51", "52", "53", "54", "55", "56"],
+        )
+        pd.testing.assert_frame_equal(excellent_df, original_excellent)
+        pd.testing.assert_frame_equal(fail_df, original_fail)
+
+    def test_context_data_note_uses_current_scoring_settings(self):
+        self.require_report_logic()
+        analysis_result = dict(self.analysis_result, excellent_percent=85)
+
+        context = report_logic.build_report_context(
+            analysis_result=analysis_result,
+            excellent_df=self.excellent_df,
+            fail_df=self.fail_df,
+            distribution=self.distribution,
+            selected_class="2501",
+            score_col="语文",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+
+        self.assertIn("当前分析范围为 2501", context["data_note"])
+        self.assertIn("当前科目或成绩列为语文", context["data_note"])
+        self.assertIn("当前成绩列满分为 120 分", context["data_note"])
+        self.assertIn("及格线为满分的 60%", context["data_note"])
+        self.assertIn("优秀线为满分的 85%", context["data_note"])
+        self.assertIn("完整名单请查看 Excel 导出", context["data_note"])
 
     def test_template_contract_can_render_with_simulated_data(self):
         """手动修改模板后可单独运行的轻量完整性检查。"""
         self.require_report_logic()
 
         template = Document(report_logic.DEFAULT_TEMPLATE_PATH)
+        template_contract = DocxTemplate(report_logic.DEFAULT_TEMPLATE_PATH)
         template_paragraphs = list(self._all_paragraphs(template))
-        complete_placeholders = {
-            match.group(1)
-            for paragraph in template_paragraphs
-            for match in re.finditer(
-                r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", paragraph.text
-            )
-        }
-        atomic_placeholders = {
-            match.group(1)
-            for paragraph in template_paragraphs
-            for run in paragraph.runs
-            for match in re.finditer(
-                r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", run.text
-            )
-        }
-        self.assertEqual(complete_placeholders, EXPECTED_TEMPLATE_PLACEHOLDERS)
-        self.assertEqual(atomic_placeholders, EXPECTED_TEMPLATE_PLACEHOLDERS)
+        self.assertEqual(
+            set(template_contract.get_undeclared_template_variables()),
+            EXPECTED_TEMPLATE_PLACEHOLDERS,
+        )
+        for paragraph in template_paragraphs:
+            for match in re.finditer(r"\{\{.*?\}\}|\{%.*?%\}", paragraph.text):
+                self.assertTrue(
+                    any(run.text.strip() == match.group(0).strip() for run in paragraph.runs),
+                    f"Jinja 表达式必须位于独立完整 Word run：{match.group(0)}",
+                )
 
         class StaticPngFigure:
             def __init__(self, marker):
@@ -146,7 +264,7 @@ class ReportLogicTest(unittest.TestCase):
             full_score=120,
             school_name="模板验证学校",
             exam_name="模板验证考试",
-            report_date="2026-07-16",
+            generated_at="2026年7月16日 09:30",
         )
 
         with ZipFile(BytesIO(report_bytes)) as archive:
@@ -171,7 +289,7 @@ class ReportLogicTest(unittest.TestCase):
         self.assertIn("模板验证学校", rendered_text)
         self.assertIn("模板验证考试", rendered_text)
 
-    def test_generated_report_keeps_images_inside_content_width_and_preserves_40_names(self):
+    def test_generated_report_keeps_images_bounded_and_summarizes_40_names(self):
         self.require_report_logic()
 
         analysis_result = {
@@ -207,7 +325,7 @@ class ReportLogicTest(unittest.TestCase):
             full_score=120,
             school_name="示例中学",
             exam_name="期中考试",
-            report_date="2026-07-15",
+            generated_at="2026年7月15日 09:30",
         )
 
         document = Document(BytesIO(report_bytes))
@@ -219,12 +337,82 @@ class ReportLogicTest(unittest.TestCase):
 
         self.assertEqual(len(document.inline_shapes), 2)
         self.assertTrue(all(shape.width <= content_width for shape in document.inline_shapes))
+        self.assertTrue(all(shape.width <= Mm(155) for shape in document.inline_shapes))
         self.assertEqual(
             len(document.element.body.xpath('.//w:br[@w:type="page"]')),
             4,
         )
-        for name in excellent_names + struggling_names:
+        for name in excellent_names[:10] + list(reversed(struggling_names))[:10]:
             self.assertIn(name, rendered_text)
+        for name in excellent_names[10:] + struggling_names[:10]:
+            self.assertNotIn(name, rendered_text)
+        self.assertIn("优秀学生共20人。", rendered_text)
+        self.assertIn("待提升学生共20人。", rendered_text)
+        self.assertEqual(
+            rendered_text.count("本报告展示前10人，另有10人未列出"),
+            2,
+        )
+
+    def test_report_without_subject_average_figure_uses_fallback_and_two_images(self):
+        self.require_report_logic()
+
+        report_bytes = report_logic.build_score_report_bytes(
+            analysis_result=self.analysis_result,
+            excellent_df=self.excellent_df,
+            fail_df=self.fail_df,
+            distribution=self.distribution,
+            distribution_figure=self.distribution_figure,
+            level_figure=self.level_figure,
+            subject_average_figure=None,
+            selected_class="2501",
+            score_col="数学",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+
+        document = Document(BytesIO(report_bytes))
+        rendered_text = "\n".join(
+            paragraph.text for paragraph in self._all_paragraphs(document)
+        )
+        self.assertEqual(len(document.inline_shapes), 2)
+        self.assertIn(
+            "当前数据仅识别到一个有效成绩科目，暂无各科平均分对比。",
+            rendered_text,
+        )
+
+    def test_report_with_subject_average_figure_embeds_three_bounded_images(self):
+        self.require_report_logic()
+        subject_average_figure = go.Figure(
+            go.Bar(x=["语文", "数学", "英语"], y=[88, 90, 86])
+        )
+
+        report_bytes = report_logic.build_score_report_bytes(
+            analysis_result=self.analysis_result,
+            excellent_df=self.excellent_df,
+            fail_df=self.fail_df,
+            distribution=self.distribution,
+            distribution_figure=self.distribution_figure,
+            level_figure=self.level_figure,
+            subject_average_figure=subject_average_figure,
+            selected_class="全部学生",
+            score_col="数学",
+            full_score=120,
+            school_name="示例学校",
+            exam_name="期中考试",
+            generated_at="2026年7月17日 00:35",
+        )
+
+        document = Document(BytesIO(report_bytes))
+        self.assertEqual(len(document.inline_shapes), 3)
+        self.assertTrue(all(shape.width <= Mm(155) for shape in document.inline_shapes))
+
+    def test_app_passes_optional_subject_average_figure_to_word_report(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("subject_average_figure = None", source)
+        self.assertIn("subject_average_figure=subject_average_figure", source)
 
     def test_build_report_context_formats_current_web_values_and_empty_inputs(self):
         self.require_report_logic()
@@ -239,7 +427,7 @@ class ReportLogicTest(unittest.TestCase):
             full_score=120,
             school_name="",
             exam_name="",
-            report_date="2026-07-14",
+            generated_at="2026年7月14日 08:15",
         )
 
         self.assertEqual(context["school_name"], "未填写")
@@ -252,8 +440,11 @@ class ReportLogicTest(unittest.TestCase):
         self.assertEqual(context["lowest_score"], "72")
         self.assertEqual(context["pass_rate"], "66.7%")
         self.assertEqual(context["excellent_rate"], "33.3%")
-        self.assertIn("张三&甲：100 分", context["excellent_students"])
-        self.assertIn("李<四：58 分", context["struggling_students"])
+        self.assertEqual(context["generated_at"], "2026年7月14日 08:15")
+        self.assertEqual(context["excellent_display_students"][0]["name"], "张三&甲")
+        self.assertEqual(context["excellent_display_students"][0]["score"], "100")
+        self.assertEqual(context["struggling_display_students"][0]["name"], "李<四")
+        self.assertEqual(context["struggling_display_students"][0]["score"], "58")
         self.assertIn("平均得分率为 73.8%", context["summary_text"])
         self.assertIn("极差为 28 分", context["summary_text"])
         self.assertIn("样本较少，结论仅供参考", context["summary_text"])
@@ -268,16 +459,20 @@ class ReportLogicTest(unittest.TestCase):
             excellent_df=pd.DataFrame(columns=["姓名", "分数"]),
             fail_df=pd.DataFrame(columns=["姓名", "分数"]),
             distribution=self.distribution,
-            selected_class="全部班级",
+            selected_class="全部学生",
             score_col="总成绩分数",
             full_score=800,
             school_name="学校",
             exam_name="考试",
-            report_date="2026-07-14",
+            generated_at="2026年7月14日 08:15",
         )
 
-        self.assertEqual(context["excellent_students"], "暂无优秀学生")
-        self.assertEqual(context["struggling_students"], "暂无待提升学生")
+        self.assertEqual(context["excellent_total_count"], 0)
+        self.assertEqual(context["struggling_total_count"], 0)
+        self.assertEqual(context["excellent_omitted_count"], 0)
+        self.assertEqual(context["struggling_omitted_count"], 0)
+        self.assertEqual(context["excellent_display_students"][0]["name"], "暂无优秀学生")
+        self.assertEqual(context["struggling_display_students"][0]["name"], "暂无待提升学生")
         self.assertIn(
             "总分分析反映整体结果，具体薄弱学科仍需结合单科数据进一步判断。",
             context["summary_text"],

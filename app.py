@@ -570,6 +570,7 @@ if uploaded_file:
                 )
 
         render_anchor("section-subjects")
+        subject_average_figure = None
         with st.container(border=True):
             render_section_header(
                 "各科平均分",
@@ -686,6 +687,7 @@ if uploaded_file:
                         distribution=distribution,
                         distribution_figure=distribution_figure,
                         level_figure=level_figure,
+                        subject_average_figure=subject_average_figure,
                         selected_class=selected_class,
                         score_col=score_col,
                         full_score=full_score,
