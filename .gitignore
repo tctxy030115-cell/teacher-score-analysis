@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local generated analysis outputs
+/sample_score_report.docx
+
+# Accidental empty test stub; active tests currently live at repository root
+/test/test_report_logic.py
