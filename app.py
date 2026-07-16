@@ -1,6 +1,17 @@
+from functools import partial
+
 import pandas as pd
 import streamlit as st
 
+from class_comparison_logic import (
+    FAIRNESS_NOTICE,
+    build_average_rate_figure,
+    build_class_comparison,
+    build_comparison_conclusion,
+    build_level_structure_figure,
+    build_pass_excellent_figure,
+    natural_sort_class_names,
+)
 from chart_logic import (
     build_invalid_data_warning,
     build_distribution_figure,
@@ -16,11 +27,12 @@ from grade_logic import (
     NAME_COLUMN_ALIASES,
     analyze_scores,
     build_full_score_context_key,
-    build_class_options,
     build_dataframe_from_header,
+    build_single_class_options,
     create_single_score_template,
     detect_header_row,
     export_score_result_to_bytes,
+    filter_dataframe_by_class,
     find_first_matching_column,
     find_first_matching_score_column,
     format_class_value,
@@ -28,6 +40,8 @@ from grade_logic import (
     get_total_score_notice,
     has_analyzable_columns,
     normalize_excellent_percent,
+    resolve_column_selection,
+    resolve_single_class_selection,
     set_column_full_score,
 )
 from report_logic import (
@@ -38,6 +52,7 @@ from report_logic import (
 from ui_components import (
     inject_global_styles,
     render_anchor,
+    render_current_context,
     render_metric_grid,
     render_page_header,
     render_section_header,
@@ -52,26 +67,155 @@ st.set_page_config(
     layout="wide",
 )
 
+st.session_state.setdefault("analysis_mode", "single_class")
+analysis_mode = st.session_state["analysis_mode"]
+
 inject_global_styles()
-render_sidebar()
+sidebar_context = render_sidebar(
+    analysis_mode=analysis_mode,
+    on_mode_change=partial(st.session_state.__setitem__, "analysis_mode"),
+)
 render_page_header()
 
 
-def pick_column_index(columns, matched_column, fallback_index=0):
-    if matched_column in columns:
-        return columns.index(matched_column)
-    return min(fallback_index, len(columns) - 1)
+def render_class_comparison_section(
+    *,
+    dataframe,
+    class_col,
+    name_col,
+    score_col,
+    full_score,
+    excellent_percent,
+    score_context_key,
+):
+    render_anchor("section-class-comparison")
+    with st.container(border=True):
+        render_section_header(
+            "班级横向对比",
+            "比",
+            "选择两个或多个班级，对比同一成绩列下的平均得分率、及格率、优秀率和等级结构。",
+        )
+        if class_col is None:
+            st.info("当前数据未识别到班级列，暂无法进行班级对比。")
+            return
+        if class_col in {name_col, score_col}:
+            st.info("班级列需与姓名列和分析科目 / 成绩列不同，暂无法进行班级对比。")
+            return
 
+        class_options = natural_sort_class_names(dataframe[class_col])
+        if len(class_options) < 2:
+            st.info("当前数据只识别到一个班级，暂无法进行班级对比。")
+            return
 
-def pick_default_class_index(class_options):
-    current_class = st.session_state.get("selected_class")
-    if current_class in class_options:
-        return class_options.index(current_class)
-    if "2401" in class_options:
-        st.session_state["selected_class"] = "2401"
-        return class_options.index("2401")
-    st.session_state["selected_class"] = "全部班级"
-    return 0
+        selected_classes = st.multiselect(
+            "选择对比班级",
+            class_options,
+            default=class_options[:6],
+            key=f"class_comparison_classes::{score_context_key}::{class_col}",
+        )
+        st.caption(
+            f"数据口径：当前工作表 · {score_col} · 满分 {float(full_score):g} 分 · "
+            f"及格线 60% · 优秀线 {float(excellent_percent):g}%"
+        )
+        if len(selected_classes) > 10:
+            st.warning("当前选择的班级较多，图表标签可能较密集；可减少班级数量以便阅读。")
+        if len(selected_classes) < 2:
+            st.info("请至少选择两个班级后生成对比。")
+            return
+
+        result = build_class_comparison(
+            dataframe,
+            class_column=class_col,
+            name_column=name_col,
+            score_column=score_col,
+            selected_classes=selected_classes,
+            full_score=full_score,
+            excellent_percent=excellent_percent,
+        )
+        if not result.excluded.empty:
+            st.warning("以下班级没有有效成绩，已从数值对比、图表和自动结论中排除。")
+            st.dataframe(result.excluded, width="stretch", hide_index=True)
+        if not result.is_comparable:
+            st.info("排除无有效成绩的班级后，可比较的班级不足两个，暂不生成对比图表。")
+            return
+
+        display_columns = [
+            "班级",
+            "原始记录数",
+            "有效人数",
+            "跳过人数",
+            "平均分",
+            "平均得分率",
+            "最高分",
+            "最低分",
+            "及格率",
+            "优秀率",
+            "待提升率",
+        ]
+        st.dataframe(
+            result.summary[display_columns],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "原始记录数": st.column_config.NumberColumn(format="%d"),
+                "有效人数": st.column_config.NumberColumn(format="%d"),
+                "跳过人数": st.column_config.NumberColumn(format="%d"),
+                "平均分": st.column_config.NumberColumn(format="%.2f"),
+                "平均得分率": st.column_config.NumberColumn(format="%.1f%%"),
+                "最高分": st.column_config.NumberColumn(format="%.2f"),
+                "最低分": st.column_config.NumberColumn(format="%.2f"),
+                "及格率": st.column_config.NumberColumn(format="%.1f%%"),
+                "优秀率": st.column_config.NumberColumn(format="%.1f%%"),
+                "待提升率": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+
+        chart_config = {"displayModeBar": False, "displaylogo": False}
+
+        average_rate_figure = build_average_rate_figure(result.summary)
+        render_anchor("section-average-rate")
+        style_dashboard_figure(
+            average_rate_figure,
+            height=420,
+            preserve_trace_colors=True,
+        )
+        st.plotly_chart(
+            average_rate_figure,
+            width="stretch",
+            config=chart_config,
+        )
+
+        pass_excellent_figure = build_pass_excellent_figure(result.summary)
+        render_anchor("section-pass-rate")
+        render_anchor("section-excellent-rate")
+        style_dashboard_figure(
+            pass_excellent_figure,
+            height=420,
+            preserve_trace_colors=True,
+        )
+        st.plotly_chart(
+            pass_excellent_figure,
+            width="stretch",
+            config=chart_config,
+        )
+
+        level_structure_figure = build_level_structure_figure(result.levels)
+        render_anchor("section-level-structure")
+        style_dashboard_figure(
+            level_structure_figure,
+            height=420,
+            preserve_trace_colors=True,
+        )
+        st.plotly_chart(
+            level_structure_figure,
+            width="stretch",
+            config=chart_config,
+        )
+
+        render_anchor("section-conclusion")
+        st.markdown("#### 自动对比结论")
+        st.write(build_comparison_conclusion(result.summary))
+        st.info(FAIRNESS_NOTICE)
 
 
 render_anchor("data-import")
@@ -91,11 +235,14 @@ with st.container(border=True):
             uploaded_file.seek(0)
             excel_file = pd.ExcelFile(uploaded_file)
             sheet_names = excel_file.sheet_names
-            selected_sheet = st.selectbox(
-                "选择要分析的工作表",
+            preferred_sheet = resolve_column_selection(
                 sheet_names,
-                index=0,
+                st.session_state.get("analysis_sheet"),
+                sheet_names[0],
             )
+            if st.session_state.get("analysis_sheet") != preferred_sheet:
+                st.session_state["analysis_sheet"] = preferred_sheet
+            selected_sheet = preferred_sheet
         except Exception as e:
             st.error(f"读取 Excel 工作表失败：{e}")
             st.stop()
@@ -161,91 +308,185 @@ if uploaded_file:
         matched_score_col = find_first_matching_score_column(columns)
         matched_class_col = find_first_matching_column(columns, CLASS_COLUMN_ALIASES)
 
-        name_default_index = pick_column_index(columns, matched_name_col, 0)
-        score_default_index = pick_column_index(columns, matched_score_col, 1)
-        class_default_index = pick_column_index(columns, matched_class_col, 0)
+        preferred_name_col = resolve_column_selection(
+            columns,
+            st.session_state.get("analysis_name_column"),
+            matched_name_col,
+            fallback_index=0,
+        )
+        if st.session_state.get("analysis_name_column") != preferred_name_col:
+            st.session_state["analysis_name_column"] = preferred_name_col
+
+        class_col = None
+        if matched_class_col is not None:
+            preferred_class_col = resolve_column_selection(
+                columns,
+                st.session_state.get("analysis_class_column"),
+                matched_class_col,
+                fallback_index=0,
+            )
+            if st.session_state.get("analysis_class_column") != preferred_class_col:
+                st.session_state["analysis_class_column"] = preferred_class_col
 
         with st.container(border=True):
-            render_section_header("选择分析对象", "选")
-            st.markdown(
-                '<p class="section-note">先确认姓名列和班级范围，再选择要分析的科目或成绩列。</p>',
-                unsafe_allow_html=True,
+            render_section_header(
+                "字段识别",
+                "识",
+                "确认姓名列和班级列；分析条件统一在下方“分析设置”中调整。",
             )
-
-            col_name, col_subject = st.columns(2)
-            name_col = col_name.selectbox(
+            name_col = st.selectbox(
                 "姓名列",
                 columns,
-                index=name_default_index,
+                key="analysis_name_column",
             )
-            score_col = col_subject.selectbox(
-                "分析科目 / 成绩列",
-                columns,
-                index=score_default_index,
-            )
-
-            class_col = None
-            selected_class = "全部班级"
             if matched_class_col is not None:
-                col_class, col_filter = st.columns(2)
-                class_col = col_class.selectbox(
+                class_col = st.selectbox(
                     "班级列",
                     columns,
-                    index=class_default_index,
+                    key="analysis_class_column",
                 )
-                class_options = build_class_options(df[class_col])
-                selected_class = col_filter.selectbox(
-                    "查看班级",
-                    class_options,
-                    index=pick_default_class_index(class_options),
-                    key="selected_class",
-                )
+            else:
+                st.info("当前工作表未识别到班级列，将整张表作为“全部学生”进行分析。")
+
+        score_options = [
+            column for column in columns if column not in {name_col, class_col}
+        ]
+        if not score_options:
+            st.error("当前工作表没有可用的科目或成绩列。")
+            st.stop()
+        preferred_score_col = resolve_column_selection(
+            score_options,
+            st.session_state.get("analysis_score_column"),
+            matched_score_col,
+            fallback_index=0,
+        )
+        if st.session_state.get("analysis_score_column") != preferred_score_col:
+            st.session_state["analysis_score_column"] = preferred_score_col
+
+        class_options = build_single_class_options(df[class_col]) if class_col is not None else []
+        selected_class = resolve_single_class_selection(
+            class_options,
+            st.session_state.get("selected_class"),
+        )
 
         with st.container(border=True):
-            render_section_header("评价标准", "标")
-            st.markdown(
-                '<p class="section-note">默认规则：优秀≥满分的90%，良好≥80%，及格≥60%。请确认当前分析列满分。</p>',
-                unsafe_allow_html=True,
+            render_section_header("分析设置", "设", "选择当前分析范围与评价标准。")
+            top_columns = st.columns(
+                3 if analysis_mode == "single_class" and class_col is not None else 2
             )
-            score_context_key = build_full_score_context_key(uploaded_file.getvalue(), selected_sheet)
+            selected_sheet = top_columns[0].selectbox(
+                "工作表",
+                sheet_names,
+                key="analysis_sheet",
+            )
+            score_col = top_columns[1].selectbox(
+                "科目 / 成绩列",
+                score_options,
+                key="analysis_score_column",
+            )
+
+            if analysis_mode == "single_class" and class_col is not None and class_options:
+                preferred_single_class = resolve_single_class_selection(
+                    class_options,
+                    st.session_state.get("selected_class"),
+                )
+                if st.session_state.get("analysis_single_class") not in class_options:
+                    st.session_state["analysis_single_class"] = preferred_single_class
+                selected_class = top_columns[2].selectbox(
+                    "当前班级",
+                    class_options,
+                    key="analysis_single_class",
+                )
+                st.session_state["selected_class"] = selected_class
+            elif class_col is None:
+                selected_class = "全部学生"
+                st.session_state["selected_class"] = selected_class
+                st.session_state["analysis_single_class"] = "全部学生"
+
+            score_context_key = build_full_score_context_key(
+                uploaded_file.getvalue(),
+                selected_sheet,
+            )
             full_score_settings = st.session_state.setdefault("full_score_by_context", {})
-            suggested_full_score = get_column_full_score(
-                full_score_settings,
-                score_context_key,
-                score_col,
-            )
-            col_full_score, col_excellent_percent = st.columns(2)
-            full_score = col_full_score.number_input(
-                "当前分析列满分",
+            full_score_key = f"full_score::{score_context_key}::{score_col}"
+            if full_score_key not in st.session_state:
+                st.session_state[full_score_key] = get_column_full_score(
+                    full_score_settings,
+                    score_context_key,
+                    score_col,
+                )
+            standard_columns = st.columns(3)
+            full_score = standard_columns[0].number_input(
+                "当前成绩列满分",
                 min_value=1.0,
-                value=suggested_full_score,
                 step=1.0,
-                key=f"full_score::{score_context_key}::{score_col}",
+                key=full_score_key,
             )
             set_column_full_score(full_score_settings, score_context_key, score_col, full_score)
-            col_full_score.caption("请填写当前所选成绩列的满分，例如数学 120 分、总分 800 分。")
-            excellent_percent = col_excellent_percent.number_input(
+
+            st.session_state.setdefault("analysis_pass_percent", 60.0)
+            standard_columns[1].number_input(
+                "及格线（固定，%）",
+                step=1.0,
+                disabled=True,
+                key="analysis_pass_percent",
+            )
+            st.session_state.setdefault("analysis_excellent_percent", 90.0)
+            excellent_percent = standard_columns[2].number_input(
                 "优秀线（%）",
                 min_value=0.0,
                 max_value=100.0,
-                value=90.0,
                 step=1.0,
+                key="analysis_excellent_percent",
             )
-            effective_excellent_percent = normalize_excellent_percent(excellent_percent)
-            if excellent_percent < 60:
-                st.warning("优秀线不能低于及格线 60%，本次分析将按 60% 处理。")
-            total_score_notice = get_total_score_notice(score_col)
-            if total_score_notice:
-                st.info(total_score_notice)
+
+        effective_excellent_percent = normalize_excellent_percent(excellent_percent)
+        if excellent_percent < 60:
+            st.warning("优秀线不能低于及格线 60%，本次分析将按 60% 处理。")
+        total_score_notice = get_total_score_notice(score_col)
+        if total_score_notice:
+            st.info(total_score_notice)
+
+        if analysis_mode == "class_comparison":
+            comparison_options = (
+                natural_sort_class_names(df[class_col]) if class_col is not None else []
+            )
+            comparison_key = f"class_comparison_classes::{score_context_key}::{class_col}"
+            comparison_selection = st.session_state.get(
+                comparison_key,
+                comparison_options[:6],
+            )
+            comparison_count = len(
+                [value for value in comparison_selection if value in comparison_options]
+            )
+            summary_class = f"{comparison_count} 个班级"
+        else:
+            summary_class = selected_class if class_options or class_col is None else "未识别有效班级"
+
+        with sidebar_context:
+            render_current_context(f"{summary_class} · {score_col}")
+
+        if analysis_mode == "single_class" and class_col is not None and not class_options:
+            st.info("当前班级列没有识别到有效班级，暂无法进行单班成绩分析。")
+            st.stop()
 
         if name_col == score_col:
             st.error("请选择不同的姓名列和分析科目 / 成绩列。")
             st.stop()
 
-        analysis_df = df.copy()
-        if class_col is not None and selected_class != "全部班级":
-            class_values = analysis_df[class_col].apply(format_class_value)
-            analysis_df = analysis_df[class_values == selected_class].copy()
+        if analysis_mode == "class_comparison":
+            render_class_comparison_section(
+                dataframe=df,
+                class_col=class_col,
+                name_col=name_col,
+                score_col=score_col,
+                full_score=full_score,
+                excellent_percent=effective_excellent_percent,
+                score_context_key=score_context_key,
+            )
+            st.stop()
+
+        analysis_df = filter_dataframe_by_class(df, class_col, selected_class)
 
         selected_columns = [name_col, score_col]
         if class_col is not None and class_col not in selected_columns:
@@ -285,9 +526,14 @@ if uploaded_file:
             current_subject=score_col,
         )
 
-        render_anchor("core-statistics")
+        render_anchor("section-overview")
         with st.container(border=True):
-            render_section_header("核心统计", "统", "当前班级与分析科目的关键成绩指标。")
+            scope_caption = (
+                f"当前范围：全部学生 · 科目：{score_col}"
+                if selected_class == "全部学生"
+                else f"当前班级：{selected_class} · 科目：{score_col}"
+            )
+            render_section_header("核心统计", "统", scope_caption)
             render_metric_grid(analysis_result)
 
         distribution = calculate_score_distribution(
@@ -306,7 +552,7 @@ if uploaded_file:
         style_dashboard_figure(level_figure, height=390)
         chart_config = {"displayModeBar": False, "displaylogo": False}
 
-        render_anchor("score-distribution")
+        render_anchor("section-distribution")
         with st.container(border=True):
             render_section_header("成绩分布与等级占比", "分", "展示当前分析列的分数区间和等级结构。")
             distribution_column, level_column = st.columns(2)
@@ -323,7 +569,7 @@ if uploaded_file:
                     config=chart_config,
                 )
 
-        render_anchor("subject-analysis")
+        render_anchor("section-subjects")
         with st.container(border=True):
             render_section_header(
                 "各科平均分",
@@ -359,11 +605,12 @@ if uploaded_file:
             columns=["姓名", "分数"],
         )
 
+        render_anchor("section-details")
         with st.container(border=True):
             render_section_header("完整成绩明细", "明", "当前筛选条件下的有效成绩与等级。")
             st.dataframe(detail_df, width="stretch")
 
-        render_anchor("excellent-list")
+        render_anchor("section-excellent")
         left, right = st.columns(2)
         with left:
             with st.container(border=True):
@@ -374,7 +621,7 @@ if uploaded_file:
                     st.dataframe(excellent_df, width="stretch")
 
         with right:
-            render_anchor("improve-list")
+            render_anchor("section-improvement")
             with st.container(border=True):
                 render_section_header("待提升名单", "升")
                 if fail_df.empty:
@@ -383,7 +630,7 @@ if uploaded_file:
                     st.dataframe(fail_df, width="stretch")
 
         excel_file = export_score_result_to_bytes(analysis_result)
-        render_anchor("export-center")
+        render_anchor("section-export")
         with st.container(border=True):
             render_section_header("导出中心", "出", "下载 Excel 数据结果，或生成包含当前图表的 Word 分析报告。")
             st.markdown(
@@ -406,7 +653,11 @@ if uploaded_file:
             )
             school_name = st.text_input("学校名称", key="word_report_school_name")
             exam_name = st.text_input("考试名称", key="word_report_exam_name")
-            st.text_input("当前班级", value=selected_class, disabled=True)
+            st.text_input(
+                "分析范围" if selected_class == "全部学生" else "当前班级",
+                value=selected_class,
+                disabled=True,
+            )
             st.text_input("当前分析科目", value=score_col, disabled=True)
 
             report_signature = (
@@ -468,4 +719,9 @@ if uploaded_file:
         st.error(f"读取 Excel 失败：{e}")
 
 else:
-    st.info("请先上传一份 Excel 成绩表。")
+    with sidebar_context:
+        render_current_context("等待上传成绩表")
+    if analysis_mode == "class_comparison":
+        st.info("请先上传包含多个班级的成绩表，系统将生成班级对比结果。")
+    else:
+        st.info("请先上传成绩表，系统将为你生成班级成绩概览。")

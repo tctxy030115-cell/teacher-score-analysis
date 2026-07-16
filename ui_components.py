@@ -178,6 +178,61 @@ def inject_global_styles() -> None:
             color: var(--dashboard-primary);
         }
 
+        .sidebar-mode-title {
+            margin: 1rem .45rem .55rem;
+            color: #94A3B8;
+            font-size: .72rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button {
+            width: 100%;
+            justify-content: flex-start;
+            min-height: 42px;
+            border-radius: 10px;
+            font-weight: 650;
+        }
+
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"] {
+            border-left: 4px solid #1D4ED8;
+        }
+
+        .sidebar-config-title {
+            margin: 1rem .15rem .55rem;
+            color: var(--dashboard-text);
+            font-size: .86rem;
+            font-weight: 750;
+        }
+
+        .sidebar-summary-card {
+            margin: .85rem 0 .35rem;
+            padding: .78rem .85rem;
+            border-radius: 12px;
+            background: #F1F6FD;
+            color: #526079;
+            font-size: .79rem;
+            line-height: 1.7;
+        }
+
+        .sidebar-summary-title {
+            margin-bottom: .28rem;
+            color: var(--dashboard-text);
+            font-size: .86rem;
+            font-weight: 750;
+        }
+
+        .sidebar-summary-label {
+            color: #7C8BA1;
+        }
+
+        .sidebar-current-context {
+            margin: .45rem .35rem .75rem;
+            color: #7C8BA1;
+            font-size: .78rem;
+            line-height: 1.45;
+        }
+
         .sidebar-footer {
             margin: 1.25rem .45rem 0;
             padding-top: 1rem;
@@ -385,7 +440,7 @@ def inject_global_styles() -> None:
     )
 
 
-def render_sidebar() -> None:
+def render_sidebar(*, analysis_mode: str, on_mode_change):
     st.sidebar.markdown(
         """
         <div class="sidebar-brand">
@@ -399,21 +454,86 @@ def render_sidebar() -> None:
         unsafe_allow_html=True,
     )
     st.sidebar.markdown(
-        """
-        <nav class="sidebar-nav" aria-label="页面内容导航">
-            <a class="is-active" href="#data-import"><span class="nav-icon">入</span>数据导入</a>
-            <a href="#core-statistics"><span class="nav-icon">统</span>基础统计</a>
-            <a href="#score-distribution"><span class="nav-icon">分</span>成绩分布</a>
-            <a href="#subject-analysis"><span class="nav-icon">科</span>学科分析</a>
-            <a href="#excellent-list"><span class="nav-icon">优</span>优秀名单</a>
-            <a href="#improve-list"><span class="nav-icon">升</span>待提升名单</a>
-            <a href="#export-center"><span class="nav-icon">出</span>导出中心</a>
-        </nav>
-        """,
+        '<div class="sidebar-mode-title">分析模式</div>',
         unsafe_allow_html=True,
+    )
+    st.sidebar.button(
+        "单班成绩分析",
+        key="analysis_mode_single_class",
+        type="primary" if analysis_mode == "single_class" else "secondary",
+        on_click=on_mode_change,
+        args=("single_class",),
+        width="stretch",
+    )
+    st.sidebar.button(
+        "多班级对比",
+        key="analysis_mode_class_comparison",
+        type="primary" if analysis_mode == "class_comparison" else "secondary",
+        on_click=on_mode_change,
+        args=("class_comparison",),
+        width="stretch",
+    )
+    navigation_items = (
+        (
+            ("统", "核心统计", "section-overview"),
+            ("分", "成绩分布与等级占比", "section-distribution"),
+            ("科", "各科平均分", "section-subjects"),
+            ("明", "完整成绩明细", "section-details"),
+            ("优", "优秀学生", "section-excellent"),
+            ("升", "待提升学生", "section-improvement"),
+            ("出", "报告导出", "section-export"),
+        )
+        if analysis_mode == "single_class"
+        else (
+            ("比", "班级横向对比", "section-class-comparison"),
+            ("均", "平均得分率", "section-average-rate"),
+            ("及", "及格率对比", "section-pass-rate"),
+            ("优", "优秀率对比", "section-excellent-rate"),
+            ("级", "等级结构", "section-level-structure"),
+            ("结", "自动结论", "section-conclusion"),
+        )
+    )
+    navigation_links = "".join(
+        f'<a href="#{anchor}"><span class="nav-icon">{escape(icon)}</span>'
+        f'{escape(label)}</a>'
+        for icon, label, anchor in navigation_items
+    )
+    st.sidebar.markdown(
+        '<div class="sidebar-mode-title">当前页面导航</div>'
+        f'<nav class="sidebar-nav" aria-label="当前页面导航">{navigation_links}</nav>',
+        unsafe_allow_html=True,
+    )
+    current_context_container = st.sidebar.container()
+    st.sidebar.button(
+        "两次考试对比（即将上线）",
+        key="analysis_mode_exam_comparison_upcoming",
+        disabled=True,
+        width="stretch",
     )
     st.sidebar.markdown(
         '<div class="sidebar-footer">一线教师自用工具 · 持续更新中</div>',
+        unsafe_allow_html=True,
+    )
+    return current_context_container
+
+
+def render_current_context(context: str) -> None:
+    st.markdown(
+        f'<div class="sidebar-current-context">当前：{escape(str(context))}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_analysis_summary(items: dict[str, object]) -> None:
+    rows = "".join(
+        '<div><span class="sidebar-summary-label">'
+        f'{escape(str(label))}：</span>{escape(str(value))}</div>'
+        for label, value in items.items()
+    )
+    st.markdown(
+        '<div class="sidebar-summary-card">'
+        '<div class="sidebar-summary-title">当前分析</div>'
+        f'{rows}</div>',
         unsafe_allow_html=True,
     )
 
@@ -478,15 +598,16 @@ def render_metric_grid(analysis_result: dict) -> None:
     st.markdown(f'<div class="metric-grid">{cards}</div>', unsafe_allow_html=True)
 
 
-def style_dashboard_figure(figure, *, height: int):
+def style_dashboard_figure(figure, *, height: int, preserve_trace_colors: bool = False):
     """只改变现有 Plotly Figure 的展示属性，保留全部数据与追踪对象。"""
+    top_margin = max(62, figure.layout.margin.t or 0)
     figure.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         height=height,
         font={"family": _FONT_FAMILY, "color": "#475569", "size": 13},
         title={"font": {"family": _FONT_FAMILY, "color": "#172033", "size": 18}},
-        margin={"l": 52, "r": 32, "t": 62, "b": 54},
+        margin={"l": 52, "r": 32, "t": top_margin, "b": 54},
         hoverlabel={"bgcolor": "#FFFFFF", "font_color": "#334155"},
         legend={"font": {"family": _FONT_FAMILY, "size": 12, "color": "#475569"}},
     )
@@ -503,14 +624,15 @@ def style_dashboard_figure(figure, *, height: int):
         tickfont={"family": _FONT_FAMILY, "size": 12},
         title_font={"family": _FONT_FAMILY, "size": 13},
     )
-    for trace in figure.data:
-        if trace.type == "bar":
-            trace.update(marker={"color": "#4F8DE8", "line": {"color": "#2563EB", "width": 1}})
-        elif trace.type == "pie":
-            trace.update(
-                marker={
-                    "colors": ["#BFD5F5", "#9ABCEB", "#719FE1", "#4F84D7", "#2563EB"],
-                    "line": {"color": "#FFFFFF", "width": 2},
-                }
-            )
+    if not preserve_trace_colors:
+        for trace in figure.data:
+            if trace.type == "bar":
+                trace.update(marker={"color": "#4F8DE8", "line": {"color": "#2563EB", "width": 1}})
+            elif trace.type == "pie":
+                trace.update(
+                    marker={
+                        "colors": ["#BFD5F5", "#9ABCEB", "#719FE1", "#4F84D7", "#2563EB"],
+                        "line": {"color": "#FFFFFF", "width": 2},
+                    }
+                )
     return apply_plotly_font_family(figure)

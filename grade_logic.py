@@ -151,6 +151,40 @@ def build_class_options(class_values):
     return options
 
 
+def build_single_class_options(class_values):
+    return ["全部学生", *build_class_options(class_values)[1:]]
+
+
+def resolve_single_class_selection(class_options, current_selection=None):
+    options = list(class_options)
+    if current_selection in options:
+        return current_selection
+    concrete_classes = [option for option in options if option != "全部学生"]
+    if concrete_classes:
+        return concrete_classes[0]
+    return "全部学生"
+
+
+def filter_dataframe_by_class(dataframe, class_column, selected_class):
+    if class_column is None or selected_class == "全部学生":
+        return dataframe.copy()
+    if selected_class in {None, "", "全部班级"}:
+        raise ValueError("单班成绩分析必须选择一个具体班级。")
+    class_values = dataframe[class_column].apply(format_class_value)
+    return dataframe[class_values == str(selected_class)].copy()
+
+
+def resolve_column_selection(columns, current_selection, matched_column=None, fallback_index=0):
+    options = list(columns)
+    if not options:
+        raise ValueError("没有可选择的列。")
+    if current_selection in options:
+        return current_selection
+    if matched_column in options:
+        return matched_column
+    return options[min(fallback_index, len(options) - 1)]
+
+
 def detect_header_row(raw_dataframe, max_scan_rows=15):
     scan_rows = min(max_scan_rows, len(raw_dataframe))
     for row_index in range(scan_rows):
@@ -322,7 +356,9 @@ def export_score_result_to_bytes(analysis_result):
 
     basic_sheet = workbook.create_sheet("基础统计")
     basic_sheet.append(["统计项目", "统计结果"])
-    basic_sheet.append(["当前班级", analysis_result.get("current_class", "全部班级")])
+    current_scope = analysis_result.get("current_class", "全部学生")
+    scope_label = "分析对象" if current_scope == "全部学生" else "当前班级"
+    basic_sheet.append([scope_label, current_scope])
     basic_sheet.append(["当前分析科目", analysis_result.get("current_subject", "")])
     basic_sheet.append(["满分", analysis_result["full_score"]])
     basic_sheet.append(["优秀线", format_percent(analysis_result["excellent_percent"])])

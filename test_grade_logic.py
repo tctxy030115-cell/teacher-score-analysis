@@ -263,6 +263,136 @@ class GradeLogicTest(unittest.TestCase):
         self.assertEqual(format_class_value("2401班"), "2401班")
         self.assertEqual(build_class_options(class_values), ["全部班级", "2401", "2402班", "2403"])
 
+    def test_single_class_mode_includes_all_students_and_preserves_valid_selection(self):
+        class_values = pd.Series([2501, 2502, 2503, 2504, 2505, 2501])
+
+        options = grade_logic.build_single_class_options(class_values)
+
+        self.assertEqual(options, ["全部学生", "2501", "2502", "2503", "2504", "2505"])
+        self.assertNotIn("全部班级", options)
+        self.assertEqual(grade_logic.resolve_single_class_selection(options), "2501")
+        self.assertEqual(grade_logic.resolve_single_class_selection(options, "全部学生"), "全部学生")
+        self.assertEqual(grade_logic.resolve_single_class_selection(options, "2502"), "2502")
+        self.assertEqual(grade_logic.resolve_single_class_selection(options, "全部班级"), "2501")
+        self.assertEqual(grade_logic.resolve_single_class_selection(options, "不存在的班级"), "2501")
+        self.assertEqual(grade_logic.resolve_single_class_selection([], None), "全部学生")
+
+    def test_all_students_selection_survives_subject_and_sheet_changes(self):
+        original_options = grade_logic.build_single_class_options(pd.Series([2501, 2502]))
+        new_sheet_options = grade_logic.build_single_class_options(pd.Series([2601, 2602]))
+
+        self.assertEqual(
+            grade_logic.resolve_single_class_selection(original_options, "全部学生"),
+            "全部学生",
+        )
+        self.assertEqual(
+            grade_logic.resolve_single_class_selection(new_sheet_options, "全部学生"),
+            "全部学生",
+        )
+        self.assertEqual(
+            grade_logic.resolve_single_class_selection(new_sheet_options, "2502"),
+            "2601",
+        )
+
+    def test_single_class_filter_strictly_isolates_2501_and_2502(self):
+        dataframe = pd.DataFrame(
+            {
+                "班级": [2501, 2501, 2502, 2502],
+                "姓名": ["甲", "乙", "丙", "丁"],
+                "数学": [95, 58, 88, 76],
+            }
+        )
+
+        class_2501 = grade_logic.filter_dataframe_by_class(dataframe, "班级", "2501")
+        class_2502 = grade_logic.filter_dataframe_by_class(dataframe, "班级", "2502")
+        all_students = grade_logic.filter_dataframe_by_class(dataframe, "班级", "全部学生")
+
+        self.assertEqual(class_2501["姓名"].tolist(), ["甲", "乙"])
+        self.assertEqual(class_2502["姓名"].tolist(), ["丙", "丁"])
+        self.assertEqual(all_students["姓名"].tolist(), ["甲", "乙", "丙", "丁"])
+        self.assertEqual(class_2501["班级"].apply(format_class_value).unique().tolist(), ["2501"])
+        self.assertEqual(class_2502["班级"].apply(format_class_value).unique().tolist(), ["2502"])
+        with self.assertRaises(ValueError):
+            grade_logic.filter_dataframe_by_class(dataframe, "班级", "全部班级")
+
+    def test_all_students_analysis_and_excel_export_use_the_full_filtered_scope(self):
+        dataframe = pd.DataFrame(
+            {
+                "班级": [2501, 2501, 2502],
+                "姓名": ["甲", "乙", "丙"],
+                "数学": [95, 58, 88],
+            }
+        )
+        analysis_df = grade_logic.filter_dataframe_by_class(dataframe, "班级", "全部学生")
+        result = analyze_scores(
+            dict(zip(analysis_df["姓名"], analysis_df["数学"])),
+            current_class="全部学生",
+            current_subject="数学",
+        )
+
+        workbook = load_workbook(export_score_result_to_bytes(result))
+        exported_names = [
+            workbook["成绩明细"].cell(row=row, column=2).value
+            for row in range(2, workbook["成绩明细"].max_row + 1)
+        ]
+
+        self.assertEqual(len(analysis_df), 3)
+        self.assertEqual(result["student_count"], 3)
+        self.assertEqual(result["excellent_students"], [["甲", 95]])
+        self.assertEqual(result["fail_students"], [["乙", 58]])
+        self.assertEqual(exported_names, ["甲", "丙", "乙"])
+
+    def test_missing_class_column_analyzes_all_students_without_filtering(self):
+        dataframe = pd.DataFrame(
+            {"姓名": ["甲", "乙", "丙"], "数学": [95, 58, 88]}
+        )
+
+        analysis_df = grade_logic.filter_dataframe_by_class(
+            dataframe,
+            None,
+            "全部学生",
+        )
+
+        self.assertEqual(analysis_df.to_dict("records"), dataframe.to_dict("records"))
+        self.assertIsNot(analysis_df, dataframe)
+
+    def test_filtered_single_class_analysis_and_excel_export_only_include_current_class(self):
+        dataframe = pd.DataFrame(
+            {
+                "班级": [2501, 2501, 2502],
+                "姓名": ["甲", "乙", "丙"],
+                "数学": [95, 58, 88],
+            }
+        )
+        filtered = grade_logic.filter_dataframe_by_class(dataframe, "班级", "2501")
+        result = analyze_scores(
+            dict(zip(filtered["姓名"], filtered["数学"])),
+            current_class="2501",
+            current_subject="数学",
+        )
+
+        workbook = load_workbook(export_score_result_to_bytes(result))
+        exported_names = [
+            workbook["成绩明细"].cell(row=row, column=2).value
+            for row in range(2, workbook["成绩明细"].max_row + 1)
+        ]
+
+        self.assertEqual(result["student_count"], 2)
+        self.assertEqual(exported_names, ["甲", "乙"])
+        self.assertNotIn("丙", exported_names)
+
+    def test_column_selection_falls_back_when_previous_sheet_column_is_missing(self):
+        new_sheet_columns = ["班级", "姓名", "数学", "英语"]
+
+        self.assertEqual(
+            grade_logic.resolve_column_selection(new_sheet_columns, "语文", "数学", fallback_index=1),
+            "数学",
+        )
+        self.assertEqual(
+            grade_logic.resolve_column_selection(new_sheet_columns, "英语", "数学", fallback_index=1),
+            "英语",
+        )
+
     def test_analyze_scores_and_export_include_current_class_and_subject(self):
         result = analyze_scores(
             {"张三": 117, "李四": 98},
@@ -284,6 +414,23 @@ class GradeLogicTest(unittest.TestCase):
         self.assertEqual(values["满分"], 120)
         self.assertEqual(values["优秀线"], "90%")
         self.assertEqual(values["及格线"], "60%")
+
+    def test_export_without_class_column_labels_scope_as_all_students(self):
+        result = analyze_scores(
+            {"张三": 90, "李四": 80},
+            current_class="全部学生",
+            current_subject="数学",
+        )
+
+        workbook = load_workbook(export_score_result_to_bytes(result))
+        basic_sheet = workbook["基础统计"]
+        values = {
+            basic_sheet.cell(row=row, column=1).value: basic_sheet.cell(row=row, column=2).value
+            for row in range(1, basic_sheet.max_row + 1)
+        }
+
+        self.assertEqual(values["分析对象"], "全部学生")
+        self.assertNotIn("当前班级", values)
 
 
 if __name__ == "__main__":
