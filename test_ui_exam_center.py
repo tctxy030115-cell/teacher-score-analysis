@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+from openpyxl import Workbook
 
 
 if "streamlit" not in sys.modules:
@@ -33,9 +34,12 @@ from services import (
     ExamColumnMapping,
     ExamImportDraft,
     ExamImportError,
+    ExamImportService,
+    build_exam_config,
+    build_grade_overview_dataframe,
     effective_config,
 )
-from student_identity import build_student_score_mapping
+from student_identity import build_student_identity_records, build_student_score_mapping
 
 
 def load_app_function(function_name, extra_namespace=None):
@@ -888,6 +892,171 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertLess(analysis_position, rerun_position)
         self.assertLess(rerun_position, snapshot_position)
 
+    def test_grade_overview_field_mapping_restores_from_exam_context_first(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("def resolve_grade_overview_field_columns(", source)
+        self.assertIn("def mark_grade_overview_field_mapping_changed(", source)
+        self.assertIn(
+            'st.error("姓名列和班级列不能相同。")',
+            source,
+        )
+        self.assertIn(
+            'st.session_state["grade_overview_field_mapping_changed"] = False',
+            source,
+        )
+
+        resolve_fields = load_app_function(
+            "resolve_grade_overview_field_columns",
+            {"ExamContext": ExamContext},
+        )
+        context = ExamContext(
+            exam_id="exam-1",
+            metadata=ExamMetadata(
+                file_name="期中.xlsx",
+                file_fingerprint="fingerprint-1",
+                sheet_name="成绩表",
+            ),
+            schema=ExamSchema(
+                name_column="姓名",
+                class_column="班级",
+                score_columns=("数学",),
+            ),
+        )
+        original_context = deepcopy(context)
+
+        name_column, class_column = resolve_fields(
+            ["班级", "姓名", "数学"],
+            context,
+            file_fingerprint="fingerprint-1",
+            sheet_name="成绩表",
+            widget_name_column="班级",
+            widget_class_column="班级",
+            matched_name_column="姓名",
+            matched_class_column="班级",
+            widget_mapping_changed=False,
+        )
+
+        self.assertEqual((name_column, class_column), ("姓名", "班级"))
+        self.assertEqual(context, original_context)
+        prepared_scores = pd.DataFrame(
+            {
+                "姓名": ["张三", "李四"],
+                "班级": ["2401", "2401"],
+                "分数": [90.0, 80.0],
+            }
+        )
+        identities = build_student_identity_records(
+            prepared_scores,
+            class_column=class_column,
+        )
+        self.assertEqual(len(build_student_score_mapping(identities)), 2)
+
+    def test_user_field_change_can_rebuild_exam_context_schema(self):
+        resolve_fields = load_app_function(
+            "resolve_grade_overview_field_columns",
+            {"ExamContext": ExamContext},
+        )
+        context = ExamContext(
+            exam_id="exam-1",
+            metadata=ExamMetadata(
+                file_name="期中.xlsx",
+                file_fingerprint="fingerprint-1",
+                sheet_name="成绩表",
+            ),
+            schema=ExamSchema(
+                name_column="姓名",
+                class_column="班级",
+                score_columns=("数学",),
+            ),
+        )
+
+        name_column, class_column = resolve_fields(
+            ["班级", "姓名", "学生姓名", "数学"],
+            context,
+            file_fingerprint="fingerprint-1",
+            sheet_name="成绩表",
+            widget_name_column="学生姓名",
+            widget_class_column="班级",
+            matched_name_column="姓名",
+            matched_class_column="班级",
+            widget_mapping_changed=True,
+        )
+
+        self.assertEqual((name_column, class_column), ("学生姓名", "班级"))
+
+    def test_confirmed_field_change_updates_current_exam_context_schema(self):
+        ensure_context = load_app_function(
+            "ensure_current_exam_context",
+            {
+                "sha256": sha256,
+                "ExamContext": ExamContext,
+                "ExamImportDraft": ExamImportDraft,
+                "ExamImportError": ExamImportError,
+            },
+        )
+        file_content = b"same exam with confirmed field change"
+        fingerprint = sha256(file_content).hexdigest()
+        old_context = ExamContext(
+            exam_id="exam-old-mapping",
+            metadata=ExamMetadata(
+                file_name="期中.xlsx",
+                file_fingerprint=fingerprint,
+                sheet_name="成绩表",
+            ),
+            schema=ExamSchema(
+                name_column="姓名",
+                class_column="班级",
+                score_columns=("数学",),
+            ),
+        )
+        updated_context = ExamContext(
+            exam_id="exam-updated-mapping",
+            metadata=old_context.metadata,
+            schema=ExamSchema(
+                name_column="学生姓名",
+                class_column="班级",
+                score_columns=("数学",),
+            ),
+        )
+        session_state = {"current_exam_context": old_context}
+        service = MagicMock()
+        service.build_context.return_value = updated_context
+
+        result = ensure_context(
+            session_state,
+            service=service,
+            file_content=file_content,
+            file_name="期中.xlsx",
+            sheet_names=("成绩表",),
+            sheet_name="成绩表",
+            detected_header_row=0,
+            header_row_index=0,
+            dataframe=pd.DataFrame(
+                {
+                    "班级": ["2401"],
+                    "姓名": ["旧姓名"],
+                    "学生姓名": ["张三"],
+                    "数学": [90],
+                }
+            ),
+            column_mapping=ExamColumnMapping(
+                name_column="学生姓名",
+                class_column="班级",
+                student_id_column=None,
+                score_columns=("数学",),
+            ),
+            exam_name="期中",
+        )
+
+        self.assertIs(result, updated_context)
+        self.assertIs(session_state["current_exam_context"], updated_context)
+        self.assertEqual(
+            session_state["current_exam_context"].schema.name_column,
+            "学生姓名",
+        )
+        service.build_context.assert_called_once()
+
     def test_matching_exam_context_is_reused_without_rebuild(self):
         ensure_context = load_app_function(
             "ensure_current_exam_context",
@@ -991,7 +1160,7 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertIs(session_state["current_exam_context"], context)
         service.build_context.assert_called_once()
 
-    def test_early_context_failure_keeps_legacy_builder_fallback(self):
+    def test_early_context_failure_preserves_cause_for_page_layer(self):
         ensure_context = load_app_function(
             "ensure_current_exam_context",
             {
@@ -1002,7 +1171,8 @@ class UiExamCenterTest(unittest.TestCase):
             },
         )
         service = MagicMock()
-        service.build_context.side_effect = ExamImportError("导入失败")
+        original_error = ExamImportError("导入失败")
+        service.build_context.side_effect = original_error
         session_state = {}
         mapping = ExamColumnMapping(
             name_column="姓名",
@@ -1011,26 +1181,24 @@ class UiExamCenterTest(unittest.TestCase):
             score_columns=("数学",),
         )
 
-        result = ensure_context(
-            session_state,
-            service=service,
-            file_content=b"broken for early builder only",
-            file_name="考试.xlsx",
-            sheet_names=("成绩表",),
-            sheet_name="成绩表",
-            detected_header_row=0,
-            header_row_index=0,
-            dataframe=pd.DataFrame({"姓名": ["张三"], "数学": [90]}),
-            column_mapping=mapping,
-            exam_name="考试",
-        )
+        with self.assertRaises(ExamImportError) as raised:
+            ensure_context(
+                session_state,
+                service=service,
+                file_content=b"broken for early builder only",
+                file_name="考试.xlsx",
+                sheet_names=("成绩表",),
+                sheet_name="成绩表",
+                detected_header_row=0,
+                header_row_index=0,
+                dataframe=pd.DataFrame({"姓名": ["张三"], "数学": [90]}),
+                column_mapping=mapping,
+                exam_name="考试",
+            )
 
-        self.assertIsNone(result)
+        self.assertIn("导入失败", str(raised.exception))
+        self.assertIs(raised.exception.__cause__, original_error)
         self.assertNotIn("current_exam_context", session_state)
-        source = Path("app.py").read_text(encoding="utf-8")
-        snapshot_position = source.index("cache_current_exam_snapshot(")
-        fallback_position = source.index("build_exam_context(", snapshot_position)
-        self.assertGreater(fallback_position, snapshot_position)
 
     def test_early_context_generation_does_not_change_snapshot_payload(self):
         source = Path("app.py").read_text(encoding="utf-8")
@@ -1085,15 +1253,20 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertIn("st.session_state.get(", config_block)
         self.assertIn('"current_exam_config"', config_block)
 
-    def test_pages_do_not_read_current_exam_config(self):
+    def test_pages_read_but_do_not_write_current_exam_config(self):
         source = Path("app.py").read_text(encoding="utf-8")
-        config_save_position = source.index(
-            'st.session_state["current_exam_config"]'
-        )
-        after_config_save = source[config_save_position + 1 :]
-
-        self.assertNotIn('st.session_state.get("current_exam_config")', after_config_save)
-        self.assertNotIn('st.session_state["current_exam_config"]', after_config_save)
+        for function_name, end_marker in (
+            ("def render_structured_subject_analysis_page(", "def render_class_analysis_page("),
+            ("def render_structured_class_analysis_page(", 'if analysis_mode == "subject_analysis":'),
+        ):
+            start = source.index(function_name)
+            end = source.index(end_marker, start)
+            page_block = source[start:end]
+            self.assertIn("exam_config", page_block)
+            self.assertNotIn(
+                'st.session_state["current_exam_config"] =',
+                page_block,
+            )
 
     def test_page_state_is_saved_after_config_as_parallel_state(self):
         source = Path("app.py").read_text(encoding="utf-8")
@@ -1138,10 +1311,14 @@ class UiExamCenterTest(unittest.TestCase):
         )
         structured_block = source[structured_start:structured_end]
 
-        self.assertIn("effective_config(", structured_block)
+        self.assertGreaterEqual(
+            structured_block.count("resolve_namespaced_subject_config("),
+            2,
+        )
         self.assertIn("get_or_build_subject_result(", structured_block)
         self.assertIn('st.session_state["current_page_state"]', structured_block)
-        self.assertIn("config_overrides=subject_overrides", structured_block)
+        self.assertIn("apply_page_config_widget_event", structured_block)
+        self.assertIn("final_subject_config", structured_block)
         for forbidden_state in (
             'st.session_state["analysis_score_column"]',
             'st.session_state["analysis_excellent_percent"]',
@@ -1242,14 +1419,14 @@ class UiExamCenterTest(unittest.TestCase):
         )
         structured_block = source[structured_start:structured_end]
 
-        self.assertIn("effective_config(", structured_block)
+        self.assertGreaterEqual(
+            structured_block.count("resolve_namespaced_subject_config("),
+            2,
+        )
         self.assertIn("get_or_build_class_result(", structured_block)
         self.assertIn('st.session_state["current_page_state"]', structured_block)
-        self.assertIn("config_overrides=class_overrides", structured_block)
-        self.assertIn(
-            "config_overrides={CLASS_ANALYSIS_OVERRIDE_NAMESPACE: class_overrides}",
-            structured_block,
-        )
+        self.assertIn("apply_page_config_widget_event", structured_block)
+        self.assertIn("final_class_config", structured_block)
         for forbidden_state in (
             'st.session_state["class_analysis_full_score"]',
             'st.session_state["class_analysis_excellent_percent"]',
@@ -1262,11 +1439,15 @@ class UiExamCenterTest(unittest.TestCase):
             self.assertNotIn(forbidden_state, structured_block)
 
     def test_class_page_override_namespace_is_not_visible_to_subject_page(self):
+        read_namespaced = load_app_function(
+            "read_namespaced_page_overrides",
+            {"PageState": PageState, "deepcopy": deepcopy},
+        )
         read_overrides = load_app_function(
             "read_class_analysis_overrides",
             {
                 "CLASS_ANALYSIS_OVERRIDE_NAMESPACE": "__class_analysis__",
-                "deepcopy": deepcopy,
+                "read_namespaced_page_overrides": read_namespaced,
             },
         )
         stored_page_state = PageState(
@@ -1342,16 +1523,17 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertIn("render_class_analysis_page(snapshot)", route_block)
         self.assertIn("st.stop()", route_block)
 
-    def test_grade_overview_context_source_falls_back_atomically(self):
+    def test_grade_overview_context_source_ignores_invalid_excel_rows(self):
         legacy_dataframe = pd.DataFrame(
-            {"姓名": ["张三", ""]},
-            index=[0, 1],
+            {"姓名": ["张三", "", None, "李四"]},
+            index=[0, 1, 2, 3],
         )
         context_dataframe = pd.DataFrame(
-            {"姓名": ["张三"]},
-            index=[0],
+            {"姓名": ["张三", "李四"]},
+            index=[0, 3],
         )
-        context = object()
+        context = MagicMock()
+        context.schema.name_column = "姓名"
         build_context_dataframe = MagicMock(return_value=context_dataframe)
         resolver = load_app_function(
             "resolve_grade_overview_fact_source",
@@ -1366,8 +1548,8 @@ class UiExamCenterTest(unittest.TestCase):
             context,
         )
 
-        self.assertIs(resolved_dataframe, legacy_dataframe)
-        self.assertIsNone(resolved_context)
+        self.assertIs(resolved_dataframe, context_dataframe)
+        self.assertIs(resolved_context, context)
 
     def test_grade_overview_context_path_never_calls_legacy_identity_builder(self):
         context = object()
@@ -1437,22 +1619,35 @@ class UiExamCenterTest(unittest.TestCase):
             self.assertIn(snapshot_key, snapshot_block)
 
     def _load_grade_rule_helpers(self):
+        read_namespaced = load_app_function(
+            "read_namespaced_page_overrides",
+            {"PageState": PageState, "deepcopy": deepcopy},
+        )
         read_overrides = load_app_function(
             "read_grade_overview_overrides",
             {
                 "GRADE_OVERVIEW_OVERRIDE_NAMESPACE": "__grade_overview__",
+                "read_namespaced_page_overrides": read_namespaced,
+            },
+        )
+        resolve_namespaced = load_app_function(
+            "resolve_namespaced_subject_config",
+            {
                 "PageState": PageState,
+                "SubjectConfig": SubjectConfig,
                 "deepcopy": deepcopy,
+                "replace": __import__("dataclasses").replace,
+                "effective_config": effective_config,
+                "read_namespaced_page_overrides": read_namespaced,
             },
         )
         resolve_rules = load_app_function(
             "resolve_grade_overview_rule_source",
             {
+                "GRADE_OVERVIEW_OVERRIDE_NAMESPACE": "__grade_overview__",
                 "PageState": PageState,
-                "deepcopy": deepcopy,
-                "replace": __import__("dataclasses").replace,
-                "effective_config": effective_config,
                 "read_grade_overview_overrides": read_overrides,
+                "resolve_namespaced_subject_config": resolve_namespaced,
             },
         )
         return read_overrides, resolve_rules
@@ -1486,6 +1681,255 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertEqual(resolved.pass_percent, 60.0)
         self.assertEqual(resolved.excellent_percent, 90.0)
         self.assertEqual(overrides, {})
+
+    def test_first_grade_overview_edit_survives_bootstrap_and_class_switch(self):
+        ensure_config_state = load_app_function(
+            "ensure_grade_overview_config_state",
+            {
+                "PageState": PageState,
+                "build_exam_config": None,
+                "deepcopy": deepcopy,
+                "replace": __import__("dataclasses").replace,
+            },
+        )
+        resolve_config, apply_event, sync_widgets = (
+            self._load_unified_page_config_helpers()
+        )
+        exam_context = MagicMock(exam_id="exam-1")
+        exam_config = ExamConfig(
+            exam_id="exam-1",
+            subjects={
+                "数学": SubjectConfig(
+                    full_score=120.0,
+                    pass_percent=60.0,
+                    excellent_percent=90.0,
+                )
+            },
+        )
+        build_calls = []
+
+        def build_config(**kwargs):
+            build_calls.append(kwargs)
+            return exam_config
+
+        session_state = {}
+        current_config, current_page_state = ensure_config_state(
+            session_state,
+            exam_context,
+            snapshot={},
+            full_score_by_subject={},
+            excellent_percent_by_subject={},
+            selected_subject="数学",
+            selected_class="全部学生",
+            config_builder=build_config,
+        )
+        base_config, initial_config, _, _ = resolve_config(
+            current_config,
+            current_page_state,
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="数学",
+            selected_classes=(),
+            system_default=SubjectConfig(
+                full_score=100.0,
+                pass_percent=60.0,
+                excellent_percent=90.0,
+            ),
+        )
+        sync_widgets(
+            session_state,
+            initial_config,
+            full_score_key="grade-full",
+            excellent_percent_key="grade-excellent",
+        )
+        session_state["grade-full"] = 150.0
+        session_state["grade-excellent"] = 80.0
+        self.assertTrue(
+            apply_event(
+                session_state,
+                namespace="__grade_overview__",
+                page_name="grade_overview",
+                exam_id="exam-1",
+                subject="数学",
+                selected_classes=(),
+                full_score_key="grade-full",
+                excellent_percent_key="grade-excellent",
+                base_config=base_config,
+            )
+        )
+
+        _, class_page_state = ensure_config_state(
+            session_state,
+            exam_context,
+            snapshot={},
+            full_score_by_subject={},
+            excellent_percent_by_subject={},
+            selected_subject="数学",
+            selected_class="2401",
+            config_builder=build_config,
+        )
+        final_config = resolve_config(
+            current_config,
+            class_page_state,
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="数学",
+            selected_classes=("2401",),
+            system_default=SubjectConfig(
+                full_score=100.0,
+                pass_percent=60.0,
+                excellent_percent=90.0,
+            ),
+        )[1]
+        result = analyze_scores(
+            {"学生A": 125.0},
+            full_score=final_config.full_score,
+            excellent_percent=final_config.excellent_percent,
+        )
+
+        self.assertEqual(len(build_calls), 1)
+        self.assertEqual(final_config.full_score, 150.0)
+        self.assertEqual(final_config.excellent_percent, 80.0)
+        self.assertEqual(
+            session_state["current_page_state"].config_overrides[
+                "__grade_overview__"
+            ]["数学"],
+            {"full_score": 150.0, "excellent_percent": 80.0},
+        )
+        self.assertEqual(result["full_score"], 150.0)
+        self.assertEqual(result["excellent_percent"], 80.0)
+        self.assertIs(session_state["current_exam_config"], exam_config)
+
+    def test_real_xlsx_builds_context_before_grade_config_and_keeps_user_rules(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "成绩表"
+        worksheet.append(["2026年期中考试"])
+        worksheet.append(["姓名", "班级", "数学"])
+        worksheet.append(["张三", "2401", 118])
+        worksheet.append([None, "说明", None])
+        worksheet.append(["李四", "2402", 109])
+        output = BytesIO()
+        workbook.save(output)
+        file_content = output.getvalue()
+
+        service = ExamImportService()
+        draft = service.prepare_sheet(
+            file_content,
+            "期中考试.xlsx",
+            "成绩表",
+            None,
+        )
+        exam_context = service.build_context(
+            draft,
+            draft.suggested_mapping,
+            exam_name="2026年期中考试",
+        )
+        resolve_fact_source = load_app_function(
+            "resolve_grade_overview_fact_source",
+            {
+                "GradeOverviewContextError": ValueError,
+                "build_grade_overview_dataframe": build_grade_overview_dataframe,
+            },
+        )
+        grade_dataframe, grade_context = resolve_fact_source(
+            draft.dataframe,
+            exam_context,
+        )
+
+        self.assertIs(grade_context, exam_context)
+        self.assertEqual(list(grade_dataframe.index), [0, 2])
+
+        ensure_config_state = load_app_function(
+            "ensure_grade_overview_config_state",
+            {
+                "PageState": PageState,
+                "build_exam_config": build_exam_config,
+                "deepcopy": deepcopy,
+                "replace": __import__("dataclasses").replace,
+            },
+        )
+        resolve_config, apply_event, sync_widgets = (
+            self._load_unified_page_config_helpers()
+        )
+        session_state = {"current_exam_context": exam_context}
+        exam_config, page_state = ensure_config_state(
+            session_state,
+            exam_context,
+            snapshot={},
+            full_score_by_subject={},
+            excellent_percent_by_subject={},
+            selected_subject="数学",
+            selected_class="全部学生",
+        )
+        system_default = SubjectConfig(
+            full_score=100.0,
+            pass_percent=60.0,
+            excellent_percent=90.0,
+        )
+        base_config, initial_config, _, _ = resolve_config(
+            exam_config,
+            page_state,
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="数学",
+            selected_classes=(),
+            system_default=system_default,
+        )
+        sync_widgets(
+            session_state,
+            initial_config,
+            full_score_key="grade-full",
+            excellent_percent_key="grade-excellent",
+        )
+        session_state["grade-full"] = 150.0
+        session_state["grade-excellent"] = 80.0
+        self.assertTrue(
+            apply_event(
+                session_state,
+                namespace="__grade_overview__",
+                page_name="grade_overview",
+                exam_id=exam_context.exam_id,
+                subject="数学",
+                selected_classes=(),
+                full_score_key="grade-full",
+                excellent_percent_key="grade-excellent",
+                base_config=base_config,
+            )
+        )
+
+        for selected_class in ("2401", "全部学生"):
+            exam_config, page_state = ensure_config_state(
+                session_state,
+                exam_context,
+                snapshot={},
+                full_score_by_subject={},
+                excellent_percent_by_subject={},
+                selected_subject="数学",
+                selected_class=selected_class,
+            )
+        final_config = resolve_config(
+            exam_config,
+            page_state,
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="数学",
+            selected_classes=(),
+            system_default=system_default,
+        )[1]
+        result = analyze_scores(
+            {"张三": 118.0, "李四": 109.0},
+            full_score=final_config.full_score,
+            excellent_percent=final_config.excellent_percent,
+        )
+
+        self.assertIs(session_state["current_exam_context"], exam_context)
+        self.assertIs(session_state["current_exam_config"], exam_config)
+        self.assertIsInstance(session_state["current_page_state"], PageState)
+        self.assertEqual(final_config.full_score, 150.0)
+        self.assertEqual(final_config.excellent_percent, 80.0)
+        self.assertEqual(result["full_score"], 150.0)
+        self.assertEqual(result["excellent_percent"], 80.0)
 
     def test_grade_overview_override_falls_back_field_by_field(self):
         _, resolve_rules = self._load_grade_rule_helpers()
@@ -1521,49 +1965,6 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertEqual(resolved.full_score, 120.0)
         self.assertEqual(resolved.pass_percent, 60.0)
         self.assertEqual(resolved.excellent_percent, 85.0)
-
-    def test_grade_overview_full_score_override_does_not_modify_exam_config(self):
-        _, resolve_rules = self._load_grade_rule_helpers()
-        update_page_state = load_app_function(
-            "update_grade_overview_page_state",
-            {
-                "GRADE_OVERVIEW_OVERRIDE_NAMESPACE": "__grade_overview__",
-                "clean_column_name": clean_column_name,
-                "deepcopy": deepcopy,
-                "replace": __import__("dataclasses").replace,
-            },
-        )
-        context = MagicMock(exam_id="exam-1")
-        exam_config = ExamConfig(
-            exam_id="exam-1",
-            subjects={"数学": SubjectConfig(full_score=120.0, excellent_percent=90.0)},
-        )
-        original_config = deepcopy(exam_config)
-        page_state = PageState(exam_id="exam-1", page_name="grade_overview")
-        base_config, _, provisional, overrides, _ = resolve_rules(
-            context,
-            exam_config,
-            page_state,
-            "数学",
-            "全部学生",
-            SubjectConfig(full_score=100.0, excellent_percent=90.0),
-        )
-
-        updated = update_page_state(
-            provisional,
-            overrides,
-            subject="数学",
-            selected_class="全部学生",
-            full_score=100.0,
-            excellent_percent=90.0,
-            base_config=base_config,
-        )
-
-        self.assertEqual(exam_config, original_config)
-        self.assertEqual(
-            updated.config_overrides["__grade_overview__"]["数学"]["full_score"],
-            100.0,
-        )
 
     def test_grade_overview_subject_overrides_are_isolated(self):
         _, resolve_rules = self._load_grade_rule_helpers()
@@ -1627,21 +2028,484 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertEqual(resolved.full_score, 120.0)
         self.assertEqual(resolved.excellent_percent, 90.0)
 
-    def test_grade_overview_invalid_widget_values_keep_effective_rules(self):
-        sanitize = load_app_function(
-            "sanitize_grade_overview_widget_rules",
-            {"isfinite": __import__("math").isfinite},
+    def _load_unified_page_config_helpers(self):
+        read_overrides = load_app_function(
+            "read_namespaced_page_overrides",
+            {"PageState": PageState, "deepcopy": deepcopy},
         )
-        resolved = SubjectConfig(
-            full_score=120.0,
-            pass_percent=60.0,
-            excellent_percent=90.0,
+        merge_overrides = load_app_function(
+            "merge_page_config_overrides",
+            {"PageState": PageState, "deepcopy": deepcopy},
+        )
+        resolve_config = load_app_function(
+            "resolve_namespaced_subject_config",
+            {
+                "PageState": PageState,
+                "SubjectConfig": SubjectConfig,
+                "deepcopy": deepcopy,
+                "replace": __import__("dataclasses").replace,
+                "effective_config": effective_config,
+                "read_namespaced_page_overrides": read_overrides,
+            },
+        )
+        apply_event = load_app_function(
+            "apply_page_config_widget_event",
+            {
+                "PageState": PageState,
+                "SubjectConfig": SubjectConfig,
+                "clean_column_name": clean_column_name,
+                "deepcopy": deepcopy,
+                "replace": __import__("dataclasses").replace,
+                "merge_page_config_overrides": merge_overrides,
+                "read_namespaced_page_overrides": read_overrides,
+                "normalize_excellent_percent": lambda value: max(float(value), 60.0),
+            },
+        )
+        sync_widgets = load_app_function(
+            "synchronize_page_config_widgets",
+            {},
+        )
+        return resolve_config, apply_event, sync_widgets
+
+    @staticmethod
+    def _unified_exam_config():
+        return ExamConfig(
+            exam_id="exam-1",
+            subjects={
+                "Math": SubjectConfig(
+                    full_score=120.0,
+                    pass_percent=60.0,
+                    excellent_percent=80.0,
+                ),
+                "English": SubjectConfig(
+                    full_score=150.0,
+                    pass_percent=60.0,
+                    excellent_percent=90.0,
+                ),
+            },
         )
 
-        for invalid in (1.0, float("nan"), float("inf")):
-            full_score, excellent_percent = sanitize(invalid, invalid, resolved)
-            self.assertEqual(full_score, 120.0)
-            self.assertEqual(excellent_percent, 90.0)
+    def test_stale_widget_values_have_no_business_authority(self):
+        resolve_config, _, sync_widgets = self._load_unified_page_config_helpers()
+        exam_config = self._unified_exam_config()
+        page_state = PageState(exam_id="exam-1", page_name="grade_overview")
+        original_page_state = deepcopy(page_state)
+        default = SubjectConfig(full_score=100.0, excellent_percent=90.0)
+
+        for stale_value in (1.0, 10.0, 20.0, float("nan"), float("inf")):
+            session_state = {
+                "full-score-widget": stale_value,
+                "excellent-widget": stale_value,
+            }
+            _, first_config, _, _ = resolve_config(
+                exam_config,
+                page_state,
+                namespace="__grade_overview__",
+                page_name="grade_overview",
+                subject="Math",
+                selected_classes=(),
+                system_default=default,
+            )
+            sync_widgets(
+                session_state,
+                first_config,
+                full_score_key="full-score-widget",
+                excellent_percent_key="excellent-widget",
+            )
+            _, final_config, _, _ = resolve_config(
+                exam_config,
+                page_state,
+                namespace="__grade_overview__",
+                page_name="grade_overview",
+                subject="Math",
+                selected_classes=(),
+                system_default=default,
+            )
+
+            self.assertEqual(final_config.full_score, 120.0)
+            self.assertEqual(final_config.pass_percent, 60.0)
+            self.assertEqual(final_config.excellent_percent, 80.0)
+            self.assertEqual(session_state["full-score-widget"], 120.0)
+            self.assertEqual(session_state["excellent-widget"], 80.0)
+            self.assertEqual(page_state, original_page_state)
+
+    def test_explicit_widget_event_persists_only_in_grade_page_state(self):
+        resolve_config, apply_event, sync_widgets = self._load_unified_page_config_helpers()
+        exam_config = self._unified_exam_config()
+        original_exam_config = deepcopy(exam_config)
+        session_state = {
+            "current_page_state": PageState(
+                exam_id="exam-1",
+                page_name="grade_overview",
+            )
+        }
+        default = SubjectConfig(full_score=100.0, excellent_percent=90.0)
+        base_config, first_config, _, _ = resolve_config(
+            exam_config,
+            session_state["current_page_state"],
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="Math",
+            selected_classes=("2401",),
+            system_default=default,
+        )
+        sync_widgets(
+            session_state,
+            first_config,
+            full_score_key="full-score-widget",
+            excellent_percent_key="excellent-widget",
+        )
+        session_state["full-score-widget"] = 150.0
+        session_state["excellent-widget"] = 85.0
+
+        changed = apply_event(
+            session_state,
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            exam_id="exam-1",
+            subject="Math",
+            selected_classes=("2401",),
+            full_score_key="full-score-widget",
+            excellent_percent_key="excellent-widget",
+            base_config=base_config,
+        )
+        _, final_config, _, _ = resolve_config(
+            exam_config,
+            session_state["current_page_state"],
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="Math",
+            selected_classes=(),
+            system_default=default,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(final_config.full_score, 150.0)
+        self.assertEqual(final_config.excellent_percent, 85.0)
+        self.assertEqual(
+            session_state["current_page_state"].config_overrides[
+                "__grade_overview__"
+            ]["Math"],
+            {"full_score": 150.0, "excellent_percent": 85.0},
+        )
+        self.assertEqual(exam_config, original_exam_config)
+
+    def test_all_analysis_pages_use_the_same_namespaced_config_flow(self):
+        resolve_config, apply_event, sync_widgets = self._load_unified_page_config_helpers()
+        exam_config = self._unified_exam_config()
+        original_exam_config = deepcopy(exam_config)
+        session_state = {
+            "current_page_state": PageState(exam_id="exam-1")
+        }
+        default = SubjectConfig(full_score=100.0, excellent_percent=90.0)
+        page_cases = (
+            ("__grade_overview__", "grade_overview", 130.0),
+            ("__class_analysis__", "class_comparison", 140.0),
+            ("__subject_analysis__", "subject_analysis", 150.0),
+        )
+
+        for namespace, page_name, requested_full_score in page_cases:
+            base_config, first_config, _, _ = resolve_config(
+                exam_config,
+                session_state["current_page_state"],
+                namespace=namespace,
+                page_name=page_name,
+                subject="Math",
+                selected_classes=("2401", "2402"),
+                system_default=default,
+            )
+            full_key = f"{page_name}-full"
+            excellent_key = f"{page_name}-excellent"
+            sync_widgets(
+                session_state,
+                first_config,
+                full_score_key=full_key,
+                excellent_percent_key=excellent_key,
+            )
+            session_state[full_key] = requested_full_score
+            session_state[excellent_key] = 85.0
+            self.assertTrue(
+                apply_event(
+                    session_state,
+                    namespace=namespace,
+                    page_name=page_name,
+                    exam_id="exam-1",
+                    subject="Math",
+                    selected_classes=("2401", "2402"),
+                    full_score_key=full_key,
+                    excellent_percent_key=excellent_key,
+                    base_config=base_config,
+                )
+            )
+            _, final_config, _, _ = resolve_config(
+                exam_config,
+                session_state["current_page_state"],
+                namespace=namespace,
+                page_name=page_name,
+                subject="Math",
+                selected_classes=("2401", "2402"),
+                system_default=default,
+            )
+            self.assertEqual(final_config.full_score, requested_full_score)
+            self.assertEqual(final_config.excellent_percent, 85.0)
+
+        self.assertEqual(
+            set(session_state["current_page_state"].config_overrides),
+            {
+                "__grade_overview__",
+                "__class_analysis__",
+                "__subject_analysis__",
+            },
+        )
+        self.assertEqual(exam_config, original_exam_config)
+
+    def test_navigation_without_grade_edit_preserves_grade_defaults(self):
+        resolve_config, apply_event, sync_widgets = self._load_unified_page_config_helpers()
+        exam_config = self._unified_exam_config()
+        original_exam_config = deepcopy(exam_config)
+        session_state = {
+            "current_page_state": PageState(exam_id="exam-1")
+        }
+        default = SubjectConfig(full_score=100.0, excellent_percent=90.0)
+
+        for selected_classes, subject in (
+            (("2401",), "Math"),
+            ((), "Math"),
+            (("2402",), "Math"),
+            ((), "English"),
+            ((), "Math"),
+        ):
+            base, initial, _, stored = resolve_config(
+                exam_config,
+                session_state["current_page_state"],
+                namespace="__grade_overview__",
+                page_name="grade_overview",
+                subject=subject,
+                selected_classes=selected_classes,
+                system_default=default,
+            )
+            session_state["current_page_state"] = stored
+            sync_widgets(
+                session_state,
+                initial,
+                full_score_key="grade-full",
+                excellent_percent_key="grade-excellent",
+            )
+            self.assertTrue(
+                apply_event(
+                    session_state,
+                    namespace="__grade_overview__",
+                    page_name="grade_overview",
+                    exam_id="exam-1",
+                    subject=subject,
+                    selected_classes=selected_classes,
+                    full_score_key="grade-full",
+                    excellent_percent_key="grade-excellent",
+                    base_config=base,
+                )
+            )
+
+        for namespace, page_name, full_score in (
+            ("__class_analysis__", "class_comparison", 100.0),
+            ("__subject_analysis__", "subject_analysis", 110.0),
+        ):
+            base, initial, _, stored = resolve_config(
+                exam_config,
+                session_state["current_page_state"],
+                namespace=namespace,
+                page_name=page_name,
+                subject="Math",
+                selected_classes=("2401", "2402"),
+                system_default=default,
+            )
+            session_state["current_page_state"] = stored
+            sync_widgets(
+                session_state,
+                initial,
+                full_score_key=f"{page_name}-full",
+                excellent_percent_key=f"{page_name}-excellent",
+            )
+            session_state[f"{page_name}-full"] = full_score
+            session_state[f"{page_name}-excellent"] = 85.0
+            self.assertTrue(
+                apply_event(
+                    session_state,
+                    namespace=namespace,
+                    page_name=page_name,
+                    exam_id="exam-1",
+                    subject="Math",
+                    selected_classes=("2401", "2402"),
+                    full_score_key=f"{page_name}-full",
+                    excellent_percent_key=f"{page_name}-excellent",
+                    base_config=base,
+                )
+            )
+
+        session_state["current_page_state"] = __import__("dataclasses").replace(
+            session_state["current_page_state"],
+            page_name="teacher_view",
+        )
+        session_state["current_page_state"] = __import__("dataclasses").replace(
+            session_state["current_page_state"],
+            page_name="student_growth",
+        )
+        _, final_config, _, final_state = resolve_config(
+            exam_config,
+            session_state["current_page_state"],
+            namespace="__grade_overview__",
+            page_name="grade_overview",
+            subject="Math",
+            selected_classes=(),
+            system_default=default,
+        )
+
+        self.assertEqual(
+            (
+                final_config.full_score,
+                final_config.pass_percent,
+                final_config.excellent_percent,
+            ),
+            (120.0, 60.0, 80.0),
+        )
+        self.assertEqual(
+            set(final_state.config_overrides),
+            {
+                "__grade_overview__",
+                "__class_analysis__",
+                "__subject_analysis__",
+            },
+        )
+        self.assertEqual(exam_config, original_exam_config)
+
+    def test_invalid_explicit_widget_event_does_not_modify_page_state(self):
+        _, apply_event, _ = self._load_unified_page_config_helpers()
+        base_config = SubjectConfig(full_score=120.0, excellent_percent=80.0)
+        for invalid_value in (None, float("nan"), float("inf")):
+            initial_state = PageState(exam_id="exam-1", page_name="grade_overview")
+            session_state = {
+                "current_page_state": initial_state,
+                "full": invalid_value,
+                "excellent": 80.0,
+            }
+            self.assertFalse(
+                apply_event(
+                    session_state,
+                    namespace="__grade_overview__",
+                    page_name="grade_overview",
+                    exam_id="exam-1",
+                    subject="Math",
+                    selected_classes=(),
+                    full_score_key="full",
+                    excellent_percent_key="excellent",
+                    base_config=base_config,
+                )
+            )
+            self.assertIs(session_state["current_page_state"], initial_state)
+
+    def test_page_config_overrides_are_saved_incrementally_by_namespace(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE = "__subject_analysis__"',
+            source,
+        )
+        self.assertIn("def merge_page_config_overrides(", source)
+
+        subject_start = source.index(
+            "def render_structured_subject_analysis_page("
+        )
+        subject_end = source.index("def render_class_analysis_page(", subject_start)
+        subject_block = source[subject_start:subject_end]
+        self.assertIn("resolve_namespaced_subject_config(", subject_block)
+        self.assertIn("apply_page_config_widget_event", subject_block)
+
+        class_start = source.index(
+            "def render_structured_class_analysis_page("
+        )
+        class_end = source.index(
+            'if analysis_mode == "subject_analysis":', class_start
+        )
+        class_block = source[class_start:class_end]
+        self.assertIn("resolve_namespaced_subject_config(", class_block)
+        self.assertIn("apply_page_config_widget_event", class_block)
+
+    def test_grade_class_subject_grade_navigation_preserves_namespaces(self):
+        merge_overrides = load_app_function(
+            "merge_page_config_overrides",
+            {"PageState": PageState, "deepcopy": deepcopy},
+        )
+        replace = __import__("dataclasses").replace
+        exam_config = ExamConfig(
+            exam_id="exam-1",
+            subjects={
+                "数学": SubjectConfig(
+                    full_score=120.0,
+                    pass_percent=60.0,
+                    excellent_percent=90.0,
+                )
+            },
+        )
+        original_exam_config = deepcopy(exam_config)
+        grade_state = PageState(
+            exam_id="exam-1",
+            page_name="grade_overview",
+            selected_subject="数学",
+            config_overrides={"__grade_overview__": {}},
+        )
+        class_state = replace(
+            grade_state,
+            page_name="class_comparison",
+            config_overrides=merge_overrides(
+                grade_state,
+                "__class_analysis__",
+                {"数学": {"full_score": 100.0, "excellent_percent": 80.0}},
+                exam_id="exam-1",
+            ),
+        )
+        subject_state = replace(
+            class_state,
+            page_name="subject_analysis",
+            config_overrides=merge_overrides(
+                class_state,
+                "__subject_analysis__",
+                {"数学": {"full_score": 110.0, "excellent_percent": 85.0}},
+                exam_id="exam-1",
+            ),
+        )
+
+        self.assertEqual(
+            set(subject_state.config_overrides),
+            {"__grade_overview__", "__class_analysis__", "__subject_analysis__"},
+        )
+        self.assertEqual(
+            subject_state.config_overrides["__class_analysis__"]["数学"][
+                "full_score"
+            ],
+            100.0,
+        )
+        self.assertEqual(
+            subject_state.config_overrides["__subject_analysis__"]["数学"][
+                "excellent_percent"
+            ],
+            85.0,
+        )
+
+        _, resolve_rules = self._load_grade_rule_helpers()
+        _, resolved, returned_grade_state, _, _ = resolve_rules(
+            MagicMock(exam_id="exam-1"),
+            exam_config,
+            subject_state,
+            "数学",
+            "全部学生",
+            SubjectConfig(full_score=100.0, pass_percent=60.0, excellent_percent=90.0),
+        )
+        self.assertEqual(resolved.pass_percent, 60.0)
+        self.assertEqual(resolved.excellent_percent, 90.0)
+        self.assertEqual(
+            set(returned_grade_state.config_overrides),
+            {"__grade_overview__", "__class_analysis__", "__subject_analysis__"},
+        )
+        self.assertEqual(exam_config, original_exam_config)
 
     def test_grade_overview_rules_keep_legacy_analysis_result_when_values_match(self):
         _, resolve_rules = self._load_grade_rule_helpers()
@@ -1704,6 +2568,16 @@ class UiExamCenterTest(unittest.TestCase):
         )
         self.assertIsNone(
             resolve_rules(context, config, None, "数学", "全部学生", default)
+        )
+        self.assertIsNone(
+            resolve_rules(
+                context,
+                ExamConfig(exam_id="exam-2"),
+                PageState(exam_id="exam-2", page_name="grade_overview"),
+                "数学",
+                "全部学生",
+                default,
+            )
         )
 
     def test_grade_overview_route_uses_effective_config_without_result_store(self):

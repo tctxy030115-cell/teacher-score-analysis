@@ -258,6 +258,77 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertIn("render_class_analysis_page(snapshot)", self.app_source)
         self.assertIn("fallback=snapshot[\"analysis_result\"]", self.app_source)
 
+    def test_structured_pages_resolve_config_twice_before_calculation(self):
+        boundaries = (
+            (
+                "def render_structured_subject_analysis_page(",
+                "def render_class_analysis_page(",
+                "final_subject_config",
+            ),
+            (
+                "def render_structured_class_analysis_page(",
+                'if analysis_mode == "subject_analysis":',
+                "final_class_config",
+            ),
+        )
+        for start_marker, end_marker, final_name in boundaries:
+            start = self.app_source.index(start_marker)
+            end = self.app_source.index(end_marker, start)
+            block = self.app_source[start:end]
+            self.assertGreaterEqual(block.count("resolve_namespaced_subject_config("), 2)
+            self.assertIn(f"full_score={final_name}.full_score", block)
+            self.assertIn(
+                f"excellent_percent={final_name}.excellent_percent",
+                block,
+            )
+
+    def test_grade_overview_calculation_and_snapshot_use_final_config(self):
+        analysis_start = self.app_source.index("identity_analysis_result = analyze_scores(")
+        snapshot_end = self.app_source.index('render_anchor("section-details")', analysis_start)
+        block = self.app_source[analysis_start:snapshot_end]
+
+        self.assertIn("full_score=final_grade_config.full_score", block)
+        self.assertIn(
+            "excellent_percent=final_grade_config.excellent_percent",
+            block,
+        )
+        self.assertIn('"full_score": float(final_grade_config.full_score)', block)
+        self.assertIn('"excellent_percent": float(', block)
+        self.assertIn("final_grade_config.excellent_percent", block)
+
+    def test_complete_new_architecture_does_not_silently_fall_back(self):
+        subject_start = self.app_source.index('if analysis_mode == "subject_analysis":')
+        class_start = self.app_source.index(
+            'if analysis_mode == "class_comparison":', subject_start
+        )
+        excel_start = self.app_source.index("uploaded_file = None", class_start)
+        subject_route = self.app_source[subject_start:class_start]
+        class_route = self.app_source[class_start:excel_start]
+
+        for route in (subject_route, class_route):
+            self.assertIn("new_architecture_ready", route)
+            self.assertIn("except", route)
+            self.assertIn("st.error(", route)
+            self.assertIn("st.stop()", route)
+            self.assertNotIn("except (AttributeError, KeyError, TypeError, ValueError):\n            pass", route)
+
+        grade_start = self.app_source.index("uploaded_file = None")
+        grade_block = self.app_source[grade_start:]
+        self.assertIn("年级总览配置解析失败", grade_block)
+        self.assertIn("st.stop()", grade_block)
+
+    def test_exam_config_is_reused_for_the_same_exam_id(self):
+        existing_check = (
+            'getattr(existing_exam_config, "exam_id", None)\n'
+            "                == current_exam_context.exam_id"
+        )
+        self.assertIn(existing_check, self.app_source)
+        reuse_start = self.app_source.index(existing_check)
+        build_start = self.app_source.index("build_exam_config(", reuse_start)
+        reuse_block = self.app_source[reuse_start:build_start]
+        self.assertIn("candidate_exam_config = existing_exam_config", reuse_block)
+        self.assertIn("else:", reuse_block)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,6 @@ from copy import deepcopy
 from dataclasses import replace
 from functools import partial
 from hashlib import sha256
-from math import isfinite
 from pathlib import Path
 
 import pandas as pd
@@ -35,7 +34,6 @@ from grade_logic import (
     build_full_score_widget_key,
     build_score_column_options,
     build_full_score_context_key,
-    initialize_full_score_widget_state,
     build_dataframe_from_header,
     build_single_class_options,
     clean_column_name,
@@ -52,7 +50,6 @@ from grade_logic import (
     normalize_excellent_percent,
     resolve_column_selection,
     resolve_single_class_selection,
-    set_column_full_score_safely,
 )
 from report_logic import (
     ReportGenerationError,
@@ -595,7 +592,7 @@ def ensure_current_exam_context(
     column_mapping,
     exam_name,
 ):
-    """字段确认后提前建立 Context；失败时由后续旧 builder 继续兜底。"""
+    """Build the ExamContext after field confirmation and preserve failures."""
 
     file_fingerprint = sha256(file_content).hexdigest()
     existing_context = session_state.get("current_exam_context")
@@ -628,22 +625,159 @@ def ensure_current_exam_context(
             column_mapping,
             exam_name=exam_name,
         )
-    except (ExamImportError, TypeError, ValueError):
-        return None
+    except (ExamImportError, TypeError, ValueError) as exc:
+        raise ExamImportError(f"当前考试上下文建立失败：{exc}") from exc
     session_state["current_exam_context"] = current_exam_context
     return current_exam_context
 
 
+def ensure_grade_overview_config_state(
+    session_state,
+    exam_context,
+    *,
+    snapshot,
+    full_score_by_subject,
+    excellent_percent_by_subject,
+    selected_subject,
+    selected_class,
+    config_builder=build_exam_config,
+):
+    """在渲染年级配置控件前建立并复用考试规则与页面状态。"""
+
+    if exam_context is None:
+        raise ValueError("当前考试上下文尚未建立。")
+
+    exam_config = session_state.get("current_exam_config")
+    if getattr(exam_config, "exam_id", None) != exam_context.exam_id:
+        exam_config = config_builder(
+            exam_context=exam_context,
+            snapshot=deepcopy(dict(snapshot or {})),
+            full_score_by_subject=deepcopy(dict(full_score_by_subject or {})),
+            excellent_percent_by_subject=deepcopy(
+                dict(excellent_percent_by_subject or {})
+            ),
+        )
+        if getattr(exam_config, "exam_id", None) != exam_context.exam_id:
+            raise ValueError("生成的考试配置与当前考试不匹配。")
+        session_state["current_exam_config"] = exam_config
+
+    current_page_state = session_state.get("current_page_state")
+    if not isinstance(current_page_state, PageState) or (
+        current_page_state.exam_id != exam_context.exam_id
+    ):
+        current_page_state = PageState(exam_id=exam_context.exam_id)
+    selected_classes = (
+        () if selected_class == "全部学生" else (str(selected_class),)
+    )
+    current_page_state = replace(
+        current_page_state,
+        exam_id=exam_context.exam_id,
+        page_name="grade_overview",
+        selected_subject=selected_subject,
+        selected_classes=selected_classes,
+        config_overrides=deepcopy(dict(current_page_state.config_overrides)),
+    )
+    session_state["current_page_state"] = current_page_state
+    return exam_config, current_page_state
+
+
+def mark_grade_overview_field_mapping_changed():
+    """标记字段控件由用户主动调整，允许本次选择更新考试上下文。"""
+
+    st.session_state["grade_overview_field_mapping_changed"] = True
+
+
+def resolve_grade_overview_field_columns(
+    columns,
+    current_exam_context,
+    *,
+    file_fingerprint,
+    sheet_name,
+    widget_name_column,
+    widget_class_column,
+    matched_name_column,
+    matched_class_column,
+    widget_mapping_changed=False,
+):
+    """恢复字段映射；页面重入优先使用当前考试上下文，主动编辑时使用控件值。"""
+
+    options = list(columns)
+    if not options:
+        raise ValueError("没有可选择的列。")
+
+    context_name_column = None
+    context_class_column = None
+    if (
+        isinstance(current_exam_context, ExamContext)
+        and current_exam_context.metadata.file_fingerprint == file_fingerprint
+        and current_exam_context.metadata.sheet_name == sheet_name
+    ):
+        context_name_column = current_exam_context.schema.name_column
+        context_class_column = current_exam_context.schema.class_column
+
+    def first_valid(candidates, fallback=None):
+        for candidate in candidates:
+            if candidate in options:
+                return candidate
+        return fallback
+
+    if widget_mapping_changed:
+        name_candidates = (
+            widget_name_column,
+            context_name_column,
+            matched_name_column,
+        )
+        class_candidates = (
+            widget_class_column,
+            context_class_column,
+            matched_class_column,
+        )
+    else:
+        name_candidates = (
+            context_name_column,
+            widget_name_column,
+            matched_name_column,
+        )
+        class_candidates = (
+            context_class_column,
+            widget_class_column,
+            matched_class_column,
+        )
+
+    name_column = first_valid(name_candidates, options[0])
+    class_column = first_valid(class_candidates)
+    return name_column, class_column
+
+
 def resolve_grade_overview_fact_source(legacy_dataframe, current_exam_context):
-    """Context 必须能完整覆盖旧表行，才能原子切换年级总览事实来源。"""
+    """Use Context only when it covers every valid student row index."""
 
     if current_exam_context is None:
         return legacy_dataframe, None
     try:
         context_dataframe = build_grade_overview_dataframe(current_exam_context)
+        name_column = current_exam_context.schema.name_column
+        normalized_names = (
+            legacy_dataframe[name_column]
+            .copy()
+            .fillna("")
+            .astype(str)
+            .str.replace("\u3000", "", regex=False)
+            .str.strip()
+        )
+        valid_name_mask = (
+            (normalized_names != "")
+            & (normalized_names.str.lower() != "nan")
+        )
+        valid_student_indices = set(legacy_dataframe.index[valid_name_mask])
+        context_student_indices = set(context_dataframe.index)
     except (GradeOverviewContextError, KeyError, TypeError, ValueError):
         return legacy_dataframe, None
-    if not context_dataframe.index.equals(legacy_dataframe.index):
+    if (
+        not legacy_dataframe.index.is_unique
+        or not context_dataframe.index.is_unique
+        or context_student_indices != valid_student_indices
+    ):
         return legacy_dataframe, None
     return context_dataframe, current_exam_context
 
@@ -672,19 +806,200 @@ def prepare_grade_overview_identity_records(
 
 
 GRADE_OVERVIEW_OVERRIDE_NAMESPACE = "__grade_overview__"
+SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE = "__subject_analysis__"
+
+
+def merge_page_config_overrides(
+    page_state,
+    namespace,
+    scoped_overrides,
+    *,
+    exam_id=None,
+):
+    """保留同一考试的其他页面配置，仅更新当前页面命名空间。"""
+
+    merged_overrides = {}
+    if (
+        isinstance(page_state, PageState)
+        and (exam_id is None or page_state.exam_id == exam_id)
+    ):
+        merged_overrides = deepcopy(dict(page_state.config_overrides))
+    merged_overrides[namespace] = deepcopy(scoped_overrides)
+    return merged_overrides
+
+
+def read_namespaced_page_overrides(page_state, exam_id, namespace):
+    """读取指定考试、指定页面命名空间的临时规则副本。"""
+
+    if not isinstance(page_state, PageState) or page_state.exam_id != exam_id:
+        return {}
+    scoped_overrides = page_state.config_overrides.get(namespace)
+    if isinstance(scoped_overrides, dict):
+        return deepcopy(scoped_overrides)
+    return {}
 
 
 def read_grade_overview_overrides(page_state, exam_id):
     """读取年级总览命名空间内的临时规则，并返回独立副本。"""
 
-    if not isinstance(page_state, PageState) or page_state.exam_id != exam_id:
-        return {}
-    scoped_overrides = page_state.config_overrides.get(
-        GRADE_OVERVIEW_OVERRIDE_NAMESPACE
+    return read_namespaced_page_overrides(
+        page_state,
+        exam_id,
+        GRADE_OVERVIEW_OVERRIDE_NAMESPACE,
     )
-    if isinstance(scoped_overrides, dict):
-        return deepcopy(scoped_overrides)
-    return {}
+
+
+def read_subject_analysis_overrides(page_state, exam_id):
+    """读取学科分析命名空间内的临时规则，并返回独立副本。"""
+
+    return read_namespaced_page_overrides(
+        page_state,
+        exam_id,
+        SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE,
+    )
+
+
+def resolve_namespaced_subject_config(
+    exam_config,
+    current_page_state,
+    *,
+    namespace,
+    page_name,
+    subject,
+    selected_classes,
+    system_default,
+):
+    """按页面命名空间解析基础规则和最终规则，不修改任何输入对象。"""
+
+    if exam_config is None or not isinstance(current_page_state, PageState):
+        raise ValueError("缺少可用的 ExamConfig 或 PageState。")
+    if current_page_state.exam_id != exam_config.exam_id:
+        raise ValueError("ExamConfig 与 PageState 不属于同一场考试。")
+
+    scoped_overrides = read_namespaced_page_overrides(
+        current_page_state,
+        exam_config.exam_id,
+        namespace,
+    )
+    stored_page_state = replace(
+        current_page_state,
+        exam_id=exam_config.exam_id,
+        page_name=page_name,
+        selected_subject=subject,
+        selected_classes=tuple(selected_classes),
+        config_overrides=deepcopy(dict(current_page_state.config_overrides)),
+    )
+    calculation_page_state = replace(
+        stored_page_state,
+        config_overrides=scoped_overrides,
+    )
+    base_config = effective_config(
+        exam_config,
+        replace(calculation_page_state, config_overrides={}),
+        subject,
+        system_default,
+    )
+    base_config = SubjectConfig(
+        full_score=base_config.full_score,
+        excellent_percent=max(
+            float(base_config.excellent_percent),
+            float(base_config.pass_percent),
+        ),
+        pass_percent=base_config.pass_percent,
+    )
+    final_config = effective_config(
+        exam_config,
+        calculation_page_state,
+        subject,
+        system_default,
+    )
+    final_config = SubjectConfig(
+        full_score=final_config.full_score,
+        excellent_percent=max(
+            float(final_config.excellent_percent),
+            float(final_config.pass_percent),
+        ),
+        pass_percent=final_config.pass_percent,
+    )
+    return base_config, final_config, calculation_page_state, stored_page_state
+
+
+def synchronize_page_config_widgets(
+    session_state,
+    resolved_config,
+    *,
+    full_score_key,
+    excellent_percent_key,
+):
+    """将 widget 展示值投影为已解析配置；widget 本身不是业务真值。"""
+
+    session_state[full_score_key] = float(resolved_config.full_score)
+    session_state[excellent_percent_key] = float(
+        resolved_config.excellent_percent
+    )
+
+
+def apply_page_config_widget_event(
+    session_state,
+    *,
+    namespace,
+    page_name,
+    exam_id,
+    subject,
+    selected_classes,
+    full_score_key,
+    excellent_percent_key,
+    base_config,
+):
+    """只在明确 widget 变更事件中校验并写入当前页面 PageState。"""
+
+    current_page_state = session_state.get("current_page_state")
+    if (
+        not isinstance(current_page_state, PageState)
+        or current_page_state.exam_id != exam_id
+    ):
+        return False
+    try:
+        candidate = SubjectConfig(
+            full_score=float(session_state.get(full_score_key)),
+            excellent_percent=normalize_excellent_percent(
+                session_state.get(excellent_percent_key)
+            ),
+            pass_percent=float(base_config.pass_percent),
+        )
+    except (TypeError, ValueError):
+        return False
+
+    scoped_overrides = read_namespaced_page_overrides(
+        current_page_state,
+        exam_id,
+        namespace,
+    )
+    subject_key = clean_column_name(subject)
+    subject_override = {}
+    if candidate.full_score != float(base_config.full_score):
+        subject_override["full_score"] = candidate.full_score
+    if candidate.excellent_percent != float(base_config.excellent_percent):
+        subject_override["excellent_percent"] = candidate.excellent_percent
+    if subject_override:
+        scoped_overrides[subject_key] = subject_override
+    else:
+        scoped_overrides.pop(subject_key, None)
+
+    session_state["current_page_state"] = replace(
+        current_page_state,
+        exam_id=exam_id,
+        page_name=page_name,
+        selected_subject=subject,
+        selected_classes=tuple(selected_classes),
+        config_overrides=merge_page_config_overrides(
+            current_page_state,
+            namespace,
+            scoped_overrides,
+            exam_id=exam_id,
+        ),
+    )
+    return True
 
 
 def resolve_grade_overview_rule_source(
@@ -697,127 +1012,41 @@ def resolve_grade_overview_rule_source(
 ):
     """原子解析年级规则；任何新架构对象不可用时返回 None。"""
 
-    if (
-        exam_context is None
-        or exam_config is None
-        or not isinstance(current_page_state, PageState)
-        or getattr(exam_config, "exam_id", None) != exam_context.exam_id
+    if exam_context is None or exam_config is None or not isinstance(
+        current_page_state,
+        PageState,
     ):
         return None
-
-    existing_overrides = read_grade_overview_overrides(
-        current_page_state,
-        exam_context.exam_id,
-    )
+    if (
+        getattr(exam_config, "exam_id", None) != exam_context.exam_id
+        or current_page_state.exam_id != exam_context.exam_id
+    ):
+        return None
     selected_classes = (
         () if selected_class == "全部学生" else (str(selected_class),)
     )
-    provisional_page_state = replace(
+    (
+        base_config,
+        resolved_config,
+        _,
+        stored_page_state,
+    ) = resolve_namespaced_subject_config(
+        exam_config,
         current_page_state,
-        exam_id=exam_context.exam_id,
+        namespace=GRADE_OVERVIEW_OVERRIDE_NAMESPACE,
         page_name="grade_overview",
-        selected_subject=subject,
+        subject=subject,
         selected_classes=selected_classes,
-        config_overrides=existing_overrides,
+        system_default=system_default,
     )
-    base_page_state = replace(provisional_page_state, config_overrides={})
-    try:
-        base_config = effective_config(
-            exam_config,
-            base_page_state,
-            subject,
-            system_default,
-        )
-        resolved_config = effective_config(
-            exam_config,
-            provisional_page_state,
-            subject,
-            system_default,
-        )
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return None
     if float(resolved_config.pass_percent) != 60.0:
-        return None
-
-    reset_widgets = not (
-        current_page_state.exam_id == exam_context.exam_id
-        and current_page_state.page_name == "grade_overview"
-        and current_page_state.selected_subject == subject
-    )
+        raise ValueError("年级总览及格线必须保持 60%。")
     return (
         base_config,
         resolved_config,
-        provisional_page_state,
-        existing_overrides,
-        reset_widgets,
-    )
-
-
-def sanitize_grade_overview_widget_rules(
-    widget_full_score,
-    widget_excellent_percent,
-    resolved_config,
-):
-    """异常 widget 值不覆盖已经解析出的有效业务规则。"""
-
-    try:
-        numeric_full_score = float(widget_full_score)
-    except (TypeError, ValueError):
-        numeric_full_score = float(resolved_config.full_score)
-    if not isfinite(numeric_full_score) or numeric_full_score < 10.0:
-        numeric_full_score = float(resolved_config.full_score)
-
-    try:
-        numeric_excellent_percent = float(widget_excellent_percent)
-    except (TypeError, ValueError):
-        numeric_excellent_percent = float(resolved_config.excellent_percent)
-    if (
-        not isfinite(numeric_excellent_percent)
-        or not 0.0 <= numeric_excellent_percent <= 100.0
-        or numeric_excellent_percent == 1.0
-    ):
-        numeric_excellent_percent = float(resolved_config.excellent_percent)
-    return numeric_full_score, numeric_excellent_percent
-
-
-def update_grade_overview_page_state(
-    provisional_page_state,
-    existing_overrides,
-    *,
-    subject,
-    selected_class,
-    full_score,
-    excellent_percent,
-    base_config,
-):
-    """将合法页面调整保存到年级命名空间，不修改 ExamConfig。"""
-
-    updated_overrides = deepcopy(existing_overrides)
-    subject_key = clean_column_name(subject)
-    subject_override = {}
-    if float(full_score) != float(base_config.full_score):
-        subject_override["full_score"] = float(full_score)
-    if float(excellent_percent) != float(base_config.excellent_percent):
-        subject_override["excellent_percent"] = float(excellent_percent)
-    if subject_override:
-        updated_overrides[subject_key] = subject_override
-    else:
-        updated_overrides.pop(subject_key, None)
-
-    selected_classes = (
-        () if selected_class == "全部学生" else (str(selected_class),)
-    )
-    local_page_state = replace(
-        provisional_page_state,
-        selected_subject=subject,
-        selected_classes=selected_classes,
-        config_overrides=updated_overrides,
-    )
-    return replace(
-        local_page_state,
-        config_overrides={
-            GRADE_OVERVIEW_OVERRIDE_NAMESPACE: updated_overrides,
-        },
+        stored_page_state,
+        read_grade_overview_overrides(current_page_state, exam_context.exam_id),
+        False,
     )
 
 
@@ -1354,6 +1583,14 @@ def render_structured_subject_analysis_page(
     if st.session_state.get("subject_analysis_score_column") != preferred_score_col:
         st.session_state["subject_analysis_score_column"] = preferred_score_col
 
+    class_col = exam_context.schema.class_column
+    selected_classes = (
+        natural_sort_class_names(
+            record.get("班级") for record in identity_records_by_index.values()
+        )
+        if class_col is not None
+        else []
+    )
     with st.container(border=True):
         render_section_header(
             "学科分析设置",
@@ -1367,89 +1604,84 @@ def render_structured_subject_analysis_page(
             key="subject_analysis_score_column",
         )
         cleaned_score_col = clean_column_name(score_col)
-        existing_overrides = (
-            deepcopy(dict(current_page_state.config_overrides))
-            if current_page_state.exam_id == exam_context.exam_id
-            else {}
-        )
-        provisional_page_state = replace(
-            current_page_state,
-            exam_id=exam_context.exam_id,
-            page_name="subject_analysis",
-            selected_subject=score_col,
-            selected_classes=(),
-            config_overrides=existing_overrides,
-        )
-        snapshot_full_scores = snapshot.get("full_score_by_column") or {}
         system_default = SubjectConfig(
-            full_score=float(
-                snapshot_full_scores.get(
-                    cleaned_score_col,
-                    get_full_score_suggestion(score_col).value,
-                )
-            ),
+            full_score=float(get_full_score_suggestion(score_col).value),
             excellent_percent=90.0,
             pass_percent=60.0,
         )
-        resolved_config = effective_config(
+        (
+            base_subject_config,
+            initial_subject_config,
+            _,
+            stored_subject_page_state,
+        ) = resolve_namespaced_subject_config(
             exam_config,
-            provisional_page_state,
-            score_col,
-            system_default,
+            current_page_state,
+            namespace=SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE,
+            page_name="subject_analysis",
+            subject=score_col,
+            selected_classes=selected_classes,
+            system_default=system_default,
         )
-        context_key = snapshot.get("score_context_key", exam_context.exam_id)
+        st.session_state["current_page_state"] = stored_subject_page_state
         full_score_widget_key = (
-            f"subject_analysis::full_score::{context_key}::{cleaned_score_col}"
+            f"subject_analysis::full_score::{exam_context.exam_id}::{cleaned_score_col}"
         )
         excellent_widget_key = (
-            f"subject_analysis::excellent_percent::{context_key}::{cleaned_score_col}"
+            f"subject_analysis::excellent_percent::{exam_context.exam_id}::{cleaned_score_col}"
         )
-        if full_score_widget_key not in st.session_state:
-            st.session_state[full_score_widget_key] = float(
-                resolved_config.full_score
-            )
-        if excellent_widget_key not in st.session_state:
-            st.session_state[excellent_widget_key] = float(
-                resolved_config.excellent_percent
-            )
-        full_score = settings_columns[1].number_input(
+        synchronize_page_config_widgets(
+            st.session_state,
+            initial_subject_config,
+            full_score_key=full_score_widget_key,
+            excellent_percent_key=excellent_widget_key,
+        )
+        widget_callback_kwargs = {
+            "session_state": st.session_state,
+            "namespace": SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE,
+            "page_name": "subject_analysis",
+            "exam_id": exam_context.exam_id,
+            "subject": score_col,
+            "selected_classes": tuple(selected_classes),
+            "full_score_key": full_score_widget_key,
+            "excellent_percent_key": excellent_widget_key,
+            "base_config": base_subject_config,
+        }
+        settings_columns[1].number_input(
             "满分",
             min_value=1.0,
             step=1.0,
             key=full_score_widget_key,
+            on_change=apply_page_config_widget_event,
+            kwargs=widget_callback_kwargs,
         )
         with settings_columns[2]:
             st.metric("及格线", "60%", help="及格线固定为满分的60%，当前不可编辑。")
-        excellent_percent = settings_columns[3].number_input(
+        settings_columns[3].number_input(
             "优秀线（%）",
-            min_value=0.0,
+            min_value=60.0,
             max_value=100.0,
             step=1.0,
             key=excellent_widget_key,
+            on_change=apply_page_config_widget_event,
+            kwargs=widget_callback_kwargs,
         )
 
-    effective_excellent_percent = normalize_excellent_percent(excellent_percent)
-    if excellent_percent < 60:
-        st.warning("优秀线不能低于及格线60%，本次学科分析将按60%处理。")
-    class_col = exam_context.schema.class_column
-    selected_classes = (
-        natural_sort_class_names(
-            record.get("班级") for record in identity_records_by_index.values()
-        )
-        if class_col is not None
-        else []
+    (
+        _,
+        final_subject_config,
+        subject_page_state,
+        stored_subject_page_state,
+    ) = resolve_namespaced_subject_config(
+        exam_config,
+        st.session_state["current_page_state"],
+        namespace=SUBJECT_ANALYSIS_OVERRIDE_NAMESPACE,
+        page_name="subject_analysis",
+        subject=score_col,
+        selected_classes=selected_classes,
+        system_default=system_default,
     )
-    subject_overrides = deepcopy(existing_overrides)
-    subject_overrides[cleaned_score_col] = {
-        "full_score": float(full_score),
-        "excellent_percent": float(excellent_percent),
-    }
-    subject_page_state = replace(
-        provisional_page_state,
-        selected_classes=tuple(selected_classes),
-        config_overrides=subject_overrides,
-    )
-    st.session_state["current_page_state"] = subject_page_state
+    st.session_state["current_page_state"] = stored_subject_page_state
 
     result = get_or_build_subject_result(
         exam_context,
@@ -1460,8 +1692,8 @@ def render_structured_subject_analysis_page(
             exam_context,
             score_col=score_col,
             selected_classes=selected_classes,
-            full_score=float(full_score),
-            excellent_percent=effective_excellent_percent,
+            full_score=final_subject_config.full_score,
+            excellent_percent=final_subject_config.excellent_percent,
         ),
     )
     if result is None:
@@ -1578,16 +1810,11 @@ CLASS_ANALYSIS_OVERRIDE_NAMESPACE = "__class_analysis__"
 def read_class_analysis_overrides(page_state, exam_id):
     """读取班级页面命名空间内的临时规则，并返回独立副本。"""
 
-    if page_state.exam_id != exam_id:
-        return {}
-    scoped_overrides = page_state.config_overrides.get(
-        CLASS_ANALYSIS_OVERRIDE_NAMESPACE
+    return read_namespaced_page_overrides(
+        page_state,
+        exam_id,
+        CLASS_ANALYSIS_OVERRIDE_NAMESPACE,
     )
-    if isinstance(scoped_overrides, dict):
-        return deepcopy(scoped_overrides)
-    if page_state.page_name == "class_comparison":
-        return deepcopy(dict(page_state.config_overrides))
-    return {}
 
 
 def calculate_class_analysis_payload(
@@ -1744,29 +1971,6 @@ def render_structured_class_analysis_page(
         st.info("当前考试不足两个有效班级，暂无法进行班级对比。")
         return True
 
-    existing_overrides = read_class_analysis_overrides(
-        current_page_state,
-        exam_context.exam_id,
-    )
-    provisional_page_state = replace(
-        current_page_state,
-        exam_id=exam_context.exam_id,
-        page_name="class_comparison",
-        selected_subject=preferred_score_col,
-        selected_classes=(),
-        config_overrides=existing_overrides,
-    )
-    system_default = SubjectConfig(
-        full_score=float(get_full_score_suggestion(preferred_score_col).value),
-        excellent_percent=90.0,
-        pass_percent=60.0,
-    )
-    resolved_config = effective_config(
-        exam_config,
-        provisional_page_state,
-        preferred_score_col,
-        system_default,
-    )
     cleaned_score_col = clean_column_name(preferred_score_col)
     full_score_widget_key = (
         f"class_analysis::full_score::{exam_context.exam_id}::{cleaned_score_col}"
@@ -1777,12 +1981,6 @@ def render_structured_class_analysis_page(
     classes_widget_key = (
         f"class_analysis::classes::{exam_context.exam_id}::{cleaned_score_col}"
     )
-    if full_score_widget_key not in st.session_state:
-        st.session_state[full_score_widget_key] = float(resolved_config.full_score)
-    if excellent_widget_key not in st.session_state:
-        st.session_state[excellent_widget_key] = float(
-            resolved_config.excellent_percent
-        )
     if classes_widget_key not in st.session_state:
         stored_classes = (
             current_page_state.selected_classes
@@ -1810,18 +2008,60 @@ def render_structured_class_analysis_page(
             score_options,
             key="class_analysis_score_column",
         )
-        full_score = setting_columns[1].number_input(
+        system_default = SubjectConfig(
+            full_score=float(get_full_score_suggestion(score_col).value),
+            excellent_percent=90.0,
+            pass_percent=60.0,
+        )
+        selected_classes = st.session_state[classes_widget_key]
+        (
+            base_class_config,
+            initial_class_config,
+            _,
+            stored_class_page_state,
+        ) = resolve_namespaced_subject_config(
+            exam_config,
+            current_page_state,
+            namespace=CLASS_ANALYSIS_OVERRIDE_NAMESPACE,
+            page_name="class_comparison",
+            subject=score_col,
+            selected_classes=selected_classes,
+            system_default=system_default,
+        )
+        st.session_state["current_page_state"] = stored_class_page_state
+        synchronize_page_config_widgets(
+            st.session_state,
+            initial_class_config,
+            full_score_key=full_score_widget_key,
+            excellent_percent_key=excellent_widget_key,
+        )
+        widget_callback_kwargs = {
+            "session_state": st.session_state,
+            "namespace": CLASS_ANALYSIS_OVERRIDE_NAMESPACE,
+            "page_name": "class_comparison",
+            "exam_id": exam_context.exam_id,
+            "subject": score_col,
+            "selected_classes": tuple(selected_classes),
+            "full_score_key": full_score_widget_key,
+            "excellent_percent_key": excellent_widget_key,
+            "base_config": base_class_config,
+        }
+        setting_columns[1].number_input(
             "满分",
             min_value=1.0,
             step=1.0,
             key=full_score_widget_key,
+            on_change=apply_page_config_widget_event,
+            kwargs=widget_callback_kwargs,
         )
-        excellent_percent = setting_columns[2].number_input(
+        setting_columns[2].number_input(
             "优秀线（%）",
-            min_value=0.0,
+            min_value=60.0,
             max_value=100.0,
             step=1.0,
             key=excellent_widget_key,
+            on_change=apply_page_config_widget_event,
+            kwargs=widget_callback_kwargs,
         )
         st.metric("及格线", "60%", help="及格线固定为满分的60%，当前不可编辑。")
         selected_classes = st.multiselect(
@@ -1830,23 +2070,19 @@ def render_structured_class_analysis_page(
             key=classes_widget_key,
         )
 
-    effective_excellent_percent = normalize_excellent_percent(excellent_percent)
-    if excellent_percent < 60:
-        st.warning("优秀线不能低于及格线60%，本次班级分析将按60%处理。")
-    class_overrides = deepcopy(existing_overrides)
-    class_overrides[clean_column_name(score_col)] = {
-        "full_score": float(full_score),
-        "excellent_percent": float(excellent_percent),
-    }
-    class_page_state = replace(
-        provisional_page_state,
-        selected_subject=score_col,
-        selected_classes=tuple(selected_classes),
-        config_overrides=class_overrides,
-    )
-    stored_class_page_state = replace(
+    (
+        _,
+        final_class_config,
         class_page_state,
-        config_overrides={CLASS_ANALYSIS_OVERRIDE_NAMESPACE: class_overrides},
+        stored_class_page_state,
+    ) = resolve_namespaced_subject_config(
+        exam_config,
+        st.session_state["current_page_state"],
+        namespace=CLASS_ANALYSIS_OVERRIDE_NAMESPACE,
+        page_name="class_comparison",
+        subject=score_col,
+        selected_classes=selected_classes,
+        system_default=system_default,
     )
     st.session_state["current_page_state"] = stored_class_page_state
 
@@ -1859,8 +2095,8 @@ def render_structured_class_analysis_page(
             exam_context,
             score_col=score_col,
             selected_classes=selected_classes,
-            full_score=float(full_score),
-            excellent_percent=effective_excellent_percent,
+            full_score=final_class_config.full_score,
+            excellent_percent=final_class_config.excellent_percent,
         ),
     )
     if result is None:
@@ -1868,8 +2104,8 @@ def render_structured_class_analysis_page(
     render_structured_class_result(
         result,
         score_col=score_col,
-        full_score=full_score,
-        excellent_percent=effective_excellent_percent,
+        full_score=final_class_config.full_score,
+        excellent_percent=final_class_config.excellent_percent,
         selected_classes=selected_classes,
     )
     return True
@@ -1886,16 +2122,16 @@ if analysis_mode == "subject_analysis":
         render_current_context(
             f'学科分析 · {st.session_state.get("subject_analysis_score_column", snapshot["score_col"])}'
         )
-    rendered_with_new_architecture = False
     current_exam_context = st.session_state.get("current_exam_context")
     current_exam_config = st.session_state.get("current_exam_config")
     current_page_state = st.session_state.get("current_page_state")
     result_store = st.session_state.get("result_store")
-    if (
+    new_architecture_ready = (
         current_exam_context is not None
         and current_exam_config is not None
         and isinstance(current_page_state, PageState)
-    ):
+    )
+    if new_architecture_ready:
         if not isinstance(result_store, ResultStore):
             result_store = ResultStore()
             st.session_state["result_store"] = result_store
@@ -1909,9 +2145,13 @@ if analysis_mode == "subject_analysis":
                     result_store=result_store,
                 )
             )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            rendered_with_new_architecture = False
-    if not rendered_with_new_architecture:
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            st.error(f"学科分析新架构执行失败：{exc}")
+            st.stop()
+        if not rendered_with_new_architecture:
+            st.error("学科分析新架构未生成有效结果，请返回年级总览检查考试数据。")
+            st.stop()
+    else:
         render_subject_analysis_page(snapshot)
     st.stop()
 
@@ -1927,16 +2167,16 @@ if analysis_mode == "class_comparison":
         render_current_context(
             f'班级分析 · {st.session_state.get("class_analysis_score_column", snapshot["score_col"])}'
         )
-    rendered_with_new_architecture = False
     current_exam_context = st.session_state.get("current_exam_context")
     current_exam_config = st.session_state.get("current_exam_config")
     current_page_state = st.session_state.get("current_page_state")
     result_store = st.session_state.get("result_store")
-    if (
+    new_architecture_ready = (
         current_exam_context is not None
         and current_exam_config is not None
         and isinstance(current_page_state, PageState)
-    ):
+    )
+    if new_architecture_ready:
         if not isinstance(result_store, ResultStore):
             result_store = ResultStore()
             st.session_state["result_store"] = result_store
@@ -1949,9 +2189,13 @@ if analysis_mode == "class_comparison":
                     result_store=result_store,
                 )
             )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            rendered_with_new_architecture = False
-    if not rendered_with_new_architecture:
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            st.error(f"班级分析新架构执行失败：{exc}")
+            st.stop()
+        if not rendered_with_new_architecture:
+            st.error("班级分析新架构未生成有效结果，请返回年级总览检查考试数据。")
+            st.stop()
+    else:
         render_class_analysis_page(snapshot)
     st.stop()
 
@@ -2053,10 +2297,29 @@ if uploaded_file:
         matched_score_col = find_first_matching_score_column(columns)
         matched_class_col = find_first_matching_column(columns, CLASS_COLUMN_ALIASES)
         student_id_col = find_student_id_column(columns)
+        current_file_fingerprint = sha256(uploaded_file.getvalue()).hexdigest()
+        preferred_name_col, preferred_class_col = (
+            resolve_grade_overview_field_columns(
+                columns,
+                st.session_state.get("current_exam_context"),
+                file_fingerprint=current_file_fingerprint,
+                sheet_name=selected_sheet,
+                widget_name_column=st.session_state.get("analysis_name_column"),
+                widget_class_column=st.session_state.get("analysis_class_column"),
+                matched_name_column=matched_name_col,
+                matched_class_column=matched_class_col,
+                widget_mapping_changed=bool(
+                    st.session_state.get("grade_overview_field_mapping_changed")
+                ),
+            )
+        )
+        st.session_state["analysis_name_column"] = preferred_name_col
+        if preferred_class_col is not None:
+            st.session_state["analysis_class_column"] = preferred_class_col
 
         preferred_name_col = resolve_column_selection(
             columns,
-            st.session_state.get("analysis_name_column"),
+            preferred_name_col,
             matched_name_col,
             fallback_index=0,
         )
@@ -2064,10 +2327,10 @@ if uploaded_file:
             st.session_state["analysis_name_column"] = preferred_name_col
 
         class_col = None
-        if matched_class_col is not None:
+        if preferred_class_col is not None:
             preferred_class_col = resolve_column_selection(
                 columns,
-                st.session_state.get("analysis_class_column"),
+                preferred_class_col,
                 matched_class_col,
                 fallback_index=0,
             )
@@ -2084,15 +2347,21 @@ if uploaded_file:
                 "姓名列",
                 columns,
                 key="analysis_name_column",
+                on_change=mark_grade_overview_field_mapping_changed,
             )
-            if matched_class_col is not None:
+            if preferred_class_col is not None:
                 class_col = st.selectbox(
                     "班级列",
                     columns,
                     key="analysis_class_column",
+                    on_change=mark_grade_overview_field_mapping_changed,
                 )
             else:
                 st.info("当前工作表未识别到班级列，将整张表作为“全部学生”进行分析。")
+
+        if class_col is not None and name_col == class_col:
+            st.error("姓名列和班级列不能相同。")
+            st.stop()
 
         score_options = build_score_column_options(
             columns,
@@ -2122,19 +2391,24 @@ if uploaded_file:
             student_id_column=student_id_col,
             score_columns=tuple(score_options),
         )
-        current_exam_context = ensure_current_exam_context(
-            st.session_state,
-            service=ExamImportService(),
-            file_content=exam_import_file_content,
-            file_name=exam_import_file_name,
-            sheet_names=sheet_names,
-            sheet_name=selected_sheet,
-            detected_header_row=detected_header_row,
-            header_row_index=int(header_row_number) - 1,
-            dataframe=df,
-            column_mapping=exam_column_mapping,
-            exam_name=Path(exam_import_file_name).stem,
-        )
+        try:
+            current_exam_context = ensure_current_exam_context(
+                st.session_state,
+                service=ExamImportService(),
+                file_content=exam_import_file_content,
+                file_name=exam_import_file_name,
+                sheet_names=sheet_names,
+                sheet_name=selected_sheet,
+                detected_header_row=detected_header_row,
+                header_row_index=int(header_row_number) - 1,
+                dataframe=df,
+                column_mapping=exam_column_mapping,
+                exam_name=Path(exam_import_file_name).stem,
+            )
+        except ExamImportError as exc:
+            st.error(str(exc))
+            st.stop()
+        st.session_state["grade_overview_field_mapping_changed"] = False
 
         grade_overview_dataframe, grade_overview_context = (
             resolve_grade_overview_fact_source(df, current_exam_context)
@@ -2195,137 +2469,131 @@ if uploaded_file:
             )
             full_score_settings = st.session_state.setdefault("full_score_by_context", {})
             snapshot = st.session_state.get("current_exam_snapshot") or {}
-            cached_full_score = None
-            if snapshot.get("score_context_key") == score_context_key:
-                cached_full_score = (snapshot.get("full_score_by_column") or {}).get(
-                    clean_column_name(score_col)
+            config_snapshot = (
+                snapshot
+                if snapshot.get("score_context_key") == score_context_key
+                else {}
+            )
+            subject_excellent_settings = st.session_state.get(
+                "subject_analysis_excellent_percent_by_context",
+                {},
+            )
+            try:
+                current_exam_config, current_grade_page_state = (
+                    ensure_grade_overview_config_state(
+                        st.session_state,
+                        grade_overview_context,
+                        snapshot=config_snapshot,
+                        full_score_by_subject=full_score_settings.get(
+                            score_context_key,
+                            {},
+                        ),
+                        excellent_percent_by_subject=subject_excellent_settings.get(
+                            score_context_key,
+                            {},
+                        ),
+                        selected_subject=score_col,
+                        selected_class=selected_class,
+                    )
                 )
+            except (TypeError, ValueError) as exc:
+                st.error(f"年级总览配置初始化失败：{exc}")
+                st.stop()
             standard_columns = st.columns(3)
             system_default = SubjectConfig(
                 full_score=float(get_full_score_suggestion(score_col).value),
                 excellent_percent=90.0,
                 pass_percent=60.0,
             )
-            grade_overview_rule_source = resolve_grade_overview_rule_source(
-                grade_overview_context,
-                st.session_state.get("current_exam_config"),
-                st.session_state.get("current_page_state"),
+            try:
+                grade_overview_rule_source = resolve_grade_overview_rule_source(
+                    grade_overview_context,
+                    current_exam_config,
+                    current_grade_page_state,
+                    score_col,
+                    selected_class,
+                    system_default,
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                st.error(f"年级总览配置解析失败：{exc}")
+                st.stop()
+            if grade_overview_rule_source is None:
+                st.error("年级总览配置尚未就绪，请重新上传当前考试。")
+                st.stop()
+            (
+                base_grade_config,
+                initial_grade_config,
+                stored_grade_page_state,
+                _,
+                _,
+            ) = grade_overview_rule_source
+            st.session_state["current_page_state"] = stored_grade_page_state
+            full_score_key = build_full_score_widget_key(
+                score_context_key,
                 score_col,
-                selected_class,
-                system_default,
             )
-            grade_overview_page_state = None
-            if grade_overview_rule_source is not None:
-                (
-                    base_grade_config,
-                    resolved_grade_config,
-                    provisional_grade_page_state,
-                    existing_grade_overrides,
-                    reset_grade_widgets,
-                ) = grade_overview_rule_source
-                full_score_key = build_full_score_widget_key(
-                    score_context_key,
-                    score_col,
-                )
-                if reset_grade_widgets:
-                    st.session_state[full_score_key] = float(
-                        resolved_grade_config.full_score
-                    )
-                    st.session_state["analysis_excellent_percent"] = float(
-                        resolved_grade_config.excellent_percent
-                    )
-                else:
-                    safe_full_score, _ = sanitize_grade_overview_widget_rules(
-                        st.session_state.get(full_score_key),
-                        resolved_grade_config.excellent_percent,
-                        resolved_grade_config,
-                    )
-                    _, safe_excellent_percent = sanitize_grade_overview_widget_rules(
-                        resolved_grade_config.full_score,
-                        st.session_state.get("analysis_excellent_percent"),
-                        resolved_grade_config,
-                    )
-                    st.session_state[full_score_key] = safe_full_score
-                    st.session_state[
-                        "analysis_excellent_percent"
-                    ] = safe_excellent_percent
-                widget_full_score = standard_columns[0].number_input(
-                    "当前成绩列满分",
-                    min_value=1.0,
-                    step=1.0,
-                    key=full_score_key,
-                )
-                st.session_state["analysis_pass_percent"] = float(
-                    resolved_grade_config.pass_percent
-                )
-                standard_columns[1].number_input(
-                    "及格线（固定，%）",
-                    step=1.0,
-                    disabled=True,
-                    key="analysis_pass_percent",
-                )
-                excellent_percent = standard_columns[2].number_input(
-                    "优秀线（%）",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=1.0,
-                    key="analysis_excellent_percent",
-                )
-                full_score, excellent_percent = (
-                    sanitize_grade_overview_widget_rules(
-                        widget_full_score,
-                        excellent_percent,
-                        resolved_grade_config,
-                    )
-                )
-                grade_overview_page_state = update_grade_overview_page_state(
-                    provisional_grade_page_state,
-                    existing_grade_overrides,
-                    subject=score_col,
-                    selected_class=selected_class,
-                    full_score=full_score,
-                    excellent_percent=excellent_percent,
-                    base_config=base_grade_config,
-                )
-                st.session_state[
-                    "current_page_state"
-                ] = grade_overview_page_state
-            else:
-                full_score_key, _ = initialize_full_score_widget_state(
-                    st.session_state,
-                    full_score_settings,
-                    score_context_key,
-                    score_col,
-                    cached_full_score,
-                )
-                widget_full_score = standard_columns[0].number_input(
-                    "当前成绩列满分",
-                    min_value=1.0,
-                    step=1.0,
-                    key=full_score_key,
-                )
-                full_score = set_column_full_score_safely(
-                    full_score_settings,
-                    score_context_key,
-                    score_col,
-                    widget_full_score,
-                    cached_full_score,
-                )
-                st.session_state.setdefault("analysis_pass_percent", 60.0)
-                standard_columns[1].number_input(
-                    "及格线（固定，%）",
-                    step=1.0,
-                    disabled=True,
-                    key="analysis_pass_percent",
-                )
-                st.session_state.setdefault("analysis_excellent_percent", 90.0)
-                excellent_percent = standard_columns[2].number_input(
-                    "优秀线（%）",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=1.0,
-                    key="analysis_excellent_percent",
-                )
+            excellent_widget_key = "analysis_excellent_percent"
+            synchronize_page_config_widgets(
+                st.session_state,
+                initial_grade_config,
+                full_score_key=full_score_key,
+                excellent_percent_key=excellent_widget_key,
+            )
+            st.session_state["analysis_pass_percent"] = float(
+                initial_grade_config.pass_percent
+            )
+            selected_classes = (
+                () if selected_class == "全部学生" else (str(selected_class),)
+            )
+            widget_callback_kwargs = {
+                "session_state": st.session_state,
+                "namespace": GRADE_OVERVIEW_OVERRIDE_NAMESPACE,
+                "page_name": "grade_overview",
+                "exam_id": grade_overview_context.exam_id,
+                "subject": score_col,
+                "selected_classes": selected_classes,
+                "full_score_key": full_score_key,
+                "excellent_percent_key": excellent_widget_key,
+                "base_config": base_grade_config,
+            }
+            standard_columns[0].number_input(
+                "当前成绩列满分",
+                min_value=1.0,
+                step=1.0,
+                key=full_score_key,
+                on_change=apply_page_config_widget_event,
+                kwargs=widget_callback_kwargs,
+            )
+            standard_columns[1].number_input(
+                "及格线（固定，%）",
+                step=1.0,
+                disabled=True,
+                key="analysis_pass_percent",
+            )
+            standard_columns[2].number_input(
+                "优秀线（%）",
+                min_value=60.0,
+                max_value=100.0,
+                step=1.0,
+                key=excellent_widget_key,
+                on_change=apply_page_config_widget_event,
+                kwargs=widget_callback_kwargs,
+            )
+            (
+                _,
+                final_grade_config,
+                _,
+                grade_overview_page_state,
+            ) = resolve_namespaced_subject_config(
+                st.session_state["current_exam_config"],
+                st.session_state["current_page_state"],
+                namespace=GRADE_OVERVIEW_OVERRIDE_NAMESPACE,
+                page_name="grade_overview",
+                subject=score_col,
+                selected_classes=selected_classes,
+                system_default=system_default,
+            )
+            st.session_state["current_page_state"] = grade_overview_page_state
             full_score_suggestion = get_full_score_suggestion(score_col)
             if full_score_suggestion.requires_confirmation:
                 st.warning(
@@ -2333,9 +2601,6 @@ if uploaded_file:
                     "当前使用 100 分作为占位，请确认并手动调整。"
                 )
 
-        effective_excellent_percent = normalize_excellent_percent(excellent_percent)
-        if excellent_percent < 60:
-            st.warning("优秀线不能低于及格线 60%，本次分析将按 60% 处理。")
         total_score_notice = get_total_score_notice(score_col)
         if total_score_notice:
             st.info(total_score_notice)
@@ -2376,7 +2641,7 @@ if uploaded_file:
         classified_rows = classify_score_rows(
             selected[name_col],
             selected[score_col],
-            full_score=full_score,
+            full_score=final_grade_config.full_score,
         )
         selected["姓名"] = classified_rows["姓名"]
         selected["分数"] = classified_rows["分数"]
@@ -2384,7 +2649,10 @@ if uploaded_file:
         valid_scores = selected[selected["无效原因"].isna()].copy()
 
         invalid_reason_counts = count_invalid_reasons(classified_rows)
-        invalid_warning = build_invalid_data_warning(invalid_reason_counts, full_score)
+        invalid_warning = build_invalid_data_warning(
+            invalid_reason_counts,
+            final_grade_config.full_score,
+        )
         if invalid_warning:
             st.warning(invalid_warning)
 
@@ -2403,8 +2671,8 @@ if uploaded_file:
         )
         identity_analysis_result = analyze_scores(
             build_student_score_mapping(identity_records),
-            full_score=full_score,
-            excellent_percent=effective_excellent_percent,
+            full_score=final_grade_config.full_score,
+            excellent_percent=final_grade_config.excellent_percent,
             current_class=selected_class,
             current_subject=score_col,
         )
@@ -2464,8 +2732,8 @@ if uploaded_file:
 
         distribution = calculate_score_distribution(
             valid_scores["分数"],
-            full_score=full_score,
-            excellent_percent=effective_excellent_percent,
+            full_score=final_grade_config.full_score,
+            excellent_percent=final_grade_config.excellent_percent,
         )
         valid_names = analysis_df[name_col].astype(str).str.replace("\u3000", "", regex=False).str.strip()
         subject_source = analysis_df[
@@ -2590,7 +2858,7 @@ if uploaded_file:
             )
             snapshot_full_score_by_column[
                 clean_column_name(score_col)
-            ] = float(full_score)
+            ] = float(final_grade_config.full_score)
             cache_current_exam_snapshot(
                 st.session_state,
                 {
@@ -2603,8 +2871,10 @@ if uploaded_file:
                     "subject_average_figure": subject_average_figure,
                     "selected_class": selected_class,
                     "score_col": score_col,
-                    "full_score": float(full_score),
-                    "excellent_percent": float(effective_excellent_percent),
+                    "full_score": float(final_grade_config.full_score),
+                    "excellent_percent": float(
+                        final_grade_config.excellent_percent
+                    ),
                     "report_name": current_report_name,
                     "score_context_key": score_context_key,
                     "name_col": name_col,
@@ -2640,8 +2910,7 @@ if uploaded_file:
             )
             existing_exam_config = st.session_state.get("current_exam_config")
             if (
-                grade_overview_page_state is not None
-                and existing_exam_config is not None
+                existing_exam_config is not None
                 and getattr(existing_exam_config, "exam_id", None)
                 == current_exam_context.exam_id
             ):
@@ -2741,8 +3010,8 @@ if uploaded_file:
                 class_col,
                 selected_class,
                 score_col,
-                float(full_score),
-                float(effective_excellent_percent),
+                float(final_grade_config.full_score),
+                float(final_grade_config.excellent_percent),
                 school_name,
                 exam_name,
             )
@@ -2763,7 +3032,7 @@ if uploaded_file:
                         subject_average_figure=subject_average_figure,
                         selected_class=selected_class,
                         score_col=score_col,
-                        full_score=full_score,
+                        full_score=final_grade_config.full_score,
                         school_name=school_name,
                         exam_name=exam_name,
                     )
