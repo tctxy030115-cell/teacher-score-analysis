@@ -196,6 +196,16 @@ class UiExamCenterTest(unittest.TestCase):
         self.assertLess(analysis_position, transition_position)
         self.assertIn('if analysis_mode == "single_class":', source)
 
+    def test_excel_upload_only_accepts_xlsx_with_explicit_guidance(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+        upload_start = source.index("st.file_uploader(")
+        upload_end = source.index("st.download_button(", upload_start)
+        upload_block = source[upload_start:upload_end]
+
+        self.assertIn('type=["xlsx"]', upload_block)
+        self.assertNotIn('"xls"', upload_block)
+        self.assertIn("请上传 .xlsx 格式 Excel 文件。", upload_block)
+
     def test_analysis_center_without_exam_context_returns_to_upload(self):
         source = Path("app.py").read_text(encoding="utf-8")
         guard = source.index(

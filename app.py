@@ -1970,8 +1970,8 @@ if show_upload:
             "依次完成 Excel 上传、工作表选择和字段确认，分析结果会自动显示在下方。",
         )
         uploaded_file = st.file_uploader(
-            "上传 Excel 成绩表",
-            type=["xlsx", "xls"],
+            "请上传 .xlsx 格式 Excel 文件。",
+            type=["xlsx"],
         )
         st.markdown(
             '<p class="section-note">已有成绩表可直接上传；没有表格？可下载单科成绩模板。</p>',
