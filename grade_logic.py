@@ -1,5 +1,7 @@
 import hashlib
+from dataclasses import dataclass
 from io import BytesIO
+from math import isfinite
 
 import pandas as pd
 from openpyxl import Workbook
@@ -23,9 +25,42 @@ SUBJECT_COLUMN_ALIASES = [
 ]
 SCORE_COLUMN_ALIASES = ["分数", "成绩", *SUBJECT_COLUMN_ALIASES, "总分"]
 CLASS_COLUMN_ALIASES = ["班级", "班别", "行政班", "班级名称"]
+STUDENT_ID_COLUMN_ALIASES = ("学号", "学生学号", "学生编号", "学籍号")
+EXAM_ID_COLUMN_ALIASES = ("考号", "准考证号", "考生号")
+ADMIN_NON_SCORE_COLUMN_ALIASES = (
+    "考室",
+    "考场",
+    "座位号",
+    "座号",
+    "排名",
+    "名次",
+    "班级分数线",
+    "年级平均分",
+)
+NON_SCORE_COLUMN_ALIASES = tuple(
+    dict.fromkeys(
+        (
+            *NAME_COLUMN_ALIASES,
+            *CLASS_COLUMN_ALIASES,
+            *STUDENT_ID_COLUMN_ALIASES,
+            *EXAM_ID_COLUMN_ALIASES,
+            *ADMIN_NON_SCORE_COLUMN_ALIASES,
+        )
+    )
+)
 TOTAL_SCORE_KEYWORDS = ("总分", "总成绩", "合计")
 SCORE_COLUMN_SUFFIXES = ("分数", "成绩", "得分", "分")
 FULL_SCORE_NOTICE = "当前选择的是总分列，请确认总分满分，避免有效成绩被错误过滤。"
+SAFE_FULL_SCORE_MIN = 10.0
+SAFE_FULL_SCORE_MAX = 1000.0
+DEFAULT_FULL_SCORE_FALLBACK = 100.0
+
+
+@dataclass(frozen=True)
+class FullScoreSuggestion:
+    value: float
+    suggested_value: float
+    requires_confirmation: bool
 
 
 def clean_column_name(column_name):
@@ -38,6 +73,27 @@ def clean_dataframe_columns(dataframe):
     cleaned = dataframe.copy()
     cleaned.columns = [clean_column_name(column) for column in cleaned.columns]
     return cleaned
+
+
+def get_non_score_columns(columns, additional_columns=()):
+    """按统一字段角色返回不能作为成绩分析列的原始列名。"""
+    blocked_names = {clean_column_name(alias) for alias in NON_SCORE_COLUMN_ALIASES}
+    blocked_names.update(
+        clean_column_name(column)
+        for column in additional_columns
+        if column is not None
+    )
+    return [
+        column
+        for column in columns
+        if clean_column_name(column) in blocked_names
+    ]
+
+
+def build_score_column_options(columns, excluded_columns=()):
+    """保留原列顺序构造成绩候选，同时排除身份、班级和管理字段。"""
+    non_score_columns = set(get_non_score_columns(columns, excluded_columns))
+    return [column for column in columns if column not in non_score_columns]
 
 
 def normalize_score_column_name(column_name):
@@ -67,6 +123,20 @@ def suggest_full_score(column_name):
     return 100.0
 
 
+def get_full_score_suggestion(column_name):
+    """返回可安全采用的满分建议，并标记异常建议需要人工确认。"""
+    suggested_value = float(suggest_full_score(column_name))
+    is_safe = (
+        isfinite(suggested_value)
+        and SAFE_FULL_SCORE_MIN <= suggested_value <= SAFE_FULL_SCORE_MAX
+    )
+    return FullScoreSuggestion(
+        value=suggested_value if is_safe else DEFAULT_FULL_SCORE_FALLBACK,
+        suggested_value=suggested_value,
+        requires_confirmation=not is_safe,
+    )
+
+
 def get_total_score_notice(column_name):
     if is_total_score_column(column_name):
         return FULL_SCORE_NOTICE
@@ -78,17 +148,90 @@ def build_full_score_context_key(file_content, sheet_name):
     return f"{file_fingerprint}:{clean_column_name(sheet_name)}"
 
 
+def _is_safe_full_score(value):
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return False
+    return isfinite(numeric_value) and numeric_value >= SAFE_FULL_SCORE_MIN
+
+
+def build_full_score_widget_key(context_key, column_name):
+    return f"full_score::{context_key}::{clean_column_name(column_name)}"
+
+
+def get_safe_initial_full_score(
+    settings,
+    context_key,
+    column_name,
+    cached_full_score=None,
+):
+    context_settings = settings.setdefault(context_key, {})
+    cleaned_name = clean_column_name(column_name)
+    saved_full_score = context_settings.get(cleaned_name)
+    if _is_safe_full_score(saved_full_score):
+        return float(saved_full_score)
+    if _is_safe_full_score(cached_full_score):
+        initial_value = float(cached_full_score)
+    else:
+        suggested_value = get_full_score_suggestion(cleaned_name).value
+        initial_value = (
+            float(suggested_value)
+            if _is_safe_full_score(suggested_value)
+            else DEFAULT_FULL_SCORE_FALLBACK
+        )
+    context_settings[cleaned_name] = initial_value
+    return initial_value
+
+
+def initialize_full_score_widget_state(
+    session_state,
+    settings,
+    context_key,
+    column_name,
+    cached_full_score=None,
+):
+    widget_key = build_full_score_widget_key(context_key, column_name)
+    initial_value = get_safe_initial_full_score(
+        settings,
+        context_key,
+        column_name,
+        cached_full_score,
+    )
+    if not _is_safe_full_score(session_state.get(widget_key)):
+        session_state[widget_key] = initial_value
+    return widget_key, float(session_state[widget_key])
+
+
 def get_column_full_score(settings, context_key, column_name):
     context_settings = settings.setdefault(context_key, {})
     cleaned_name = clean_column_name(column_name)
     if cleaned_name not in context_settings:
-        context_settings[cleaned_name] = suggest_full_score(cleaned_name)
+        context_settings[cleaned_name] = get_full_score_suggestion(cleaned_name).value
     return float(context_settings[cleaned_name])
 
 
 def set_column_full_score(settings, context_key, column_name, full_score):
     context_settings = settings.setdefault(context_key, {})
     context_settings[clean_column_name(column_name)] = float(full_score)
+
+
+def set_column_full_score_safely(
+    settings,
+    context_key,
+    column_name,
+    full_score,
+    cached_full_score=None,
+):
+    if _is_safe_full_score(full_score):
+        set_column_full_score(settings, context_key, column_name, full_score)
+        return float(full_score)
+    return get_safe_initial_full_score(
+        settings,
+        context_key,
+        column_name,
+        cached_full_score,
+    )
 
 
 def find_first_matching_column(columns, aliases):

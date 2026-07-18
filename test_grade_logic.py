@@ -1,5 +1,6 @@
 ﻿from io import BytesIO
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -69,6 +70,60 @@ class GradeLogicTest(unittest.TestCase):
         self.assertIsNone(grade_logic.find_first_matching_score_column(descriptive_columns))
         self.assertFalse(has_analyzable_columns(descriptive_columns))
 
+    def test_score_options_exclude_structural_columns_from_real_exam_sheet(self):
+        self.assertTrue(hasattr(grade_logic, "get_non_score_columns"))
+        self.assertTrue(hasattr(grade_logic, "build_score_column_options"))
+        columns = ["班级", "考号", "姓名", "考室", "语文", "数学", "排名"]
+
+        self.assertEqual(
+            grade_logic.get_non_score_columns(columns),
+            ["班级", "考号", "姓名", "考室", "排名"],
+        )
+        self.assertEqual(
+            grade_logic.build_score_column_options(columns),
+            ["语文", "数学"],
+        )
+
+    def test_score_options_keep_custom_subjects_and_reject_all_identity_aliases(self):
+        build_options = getattr(grade_logic, "build_score_column_options", None)
+        self.assertIsNotNone(build_options, "缺少统一成绩候选构造函数")
+        columns = [
+            "姓名",
+            "学生姓名",
+            "班级",
+            "行政班",
+            "学号",
+            "学生学号",
+            "学生编号",
+            "学籍号",
+            "考号",
+            "准考证号",
+            "数学成绩",
+            "音乐",
+            "校本课程",
+        ]
+
+        self.assertEqual(
+            build_options(columns),
+            ["数学成绩", "音乐", "校本课程"],
+        )
+
+    def test_invalid_saved_score_column_falls_back_to_recognized_subject(self):
+        build_options = getattr(grade_logic, "build_score_column_options", None)
+        self.assertIsNotNone(build_options, "缺少统一成绩候选构造函数")
+        columns = ["班级", "考号", "姓名", "考室", "语文", "数学", "排名"]
+        score_options = build_options(columns)
+        matched_score = grade_logic.find_first_matching_score_column(columns)
+
+        self.assertEqual(
+            grade_logic.resolve_column_selection(
+                score_options,
+                "考号",
+                matched_score,
+            ),
+            "语文",
+        )
+
     def test_header_detection_accepts_suffixed_score_columns(self):
         self.assertTrue(
             hasattr(grade_logic, "find_first_matching_score_column"),
@@ -122,6 +177,137 @@ class GradeLogicTest(unittest.TestCase):
             "当前选择的是总分列，请确认总分满分，避免有效成绩被错误过滤。",
         )
         self.assertIsNone(grade_logic.get_total_score_notice("数学"))
+
+    def test_unsafe_full_score_suggestion_requires_confirmation_and_is_not_adopted(self):
+        self.assertTrue(hasattr(grade_logic, "get_full_score_suggestion"))
+        for unsafe_value in (5.0, 1201.0):
+            with self.subTest(unsafe_value=unsafe_value):
+                settings = {}
+                with patch("grade_logic.suggest_full_score", return_value=unsafe_value):
+                    suggestion = grade_logic.get_full_score_suggestion("数学")
+                    adopted = grade_logic.get_column_full_score(
+                        settings,
+                        "workbook:sheet",
+                        "数学",
+                    )
+
+                self.assertEqual(suggestion.value, 100.0)
+                self.assertEqual(suggestion.suggested_value, unsafe_value)
+                self.assertTrue(suggestion.requires_confirmation)
+                self.assertEqual(adopted, 100.0)
+
+    def test_full_score_survives_name_field_change(self):
+        settings = {"exam:sheet": {"数学": 120.0}}
+        session_state = {"analysis_name_column": "姓名"}
+
+        key, value = grade_logic.initialize_full_score_widget_state(
+            session_state,
+            settings,
+            "exam:sheet",
+            "数学",
+        )
+        session_state["analysis_name_column"] = "学生姓名"
+        regenerated_key, regenerated_value = (
+            grade_logic.initialize_full_score_widget_state(
+                session_state,
+                settings,
+                "exam:sheet",
+                "数学",
+            )
+        )
+
+        self.assertEqual(regenerated_key, key)
+        self.assertEqual(regenerated_value, value)
+        self.assertEqual(regenerated_value, 120.0)
+
+    def test_full_score_survives_class_field_change(self):
+        settings = {"exam:sheet": {"数学": 120.0}}
+        session_state = {"analysis_class_column": "班级"}
+
+        key, value = grade_logic.initialize_full_score_widget_state(
+            session_state,
+            settings,
+            "exam:sheet",
+            "数学",
+        )
+        session_state["analysis_class_column"] = "行政班"
+        regenerated_key, regenerated_value = (
+            grade_logic.initialize_full_score_widget_state(
+                session_state,
+                settings,
+                "exam:sheet",
+                "数学",
+            )
+        )
+
+        self.assertEqual(regenerated_key, key)
+        self.assertEqual(regenerated_value, value)
+        self.assertEqual(regenerated_value, 120.0)
+
+    def test_full_score_widget_key_normalizes_column_and_restores_each_subject(self):
+        settings = {"exam:sheet": {"数学": 120.0, "英语": 150.0}}
+        session_state = {}
+
+        math_key, math_value = grade_logic.initialize_full_score_widget_state(
+            session_state,
+            settings,
+            "exam:sheet",
+            " 数学\n",
+        )
+        english_key, english_value = grade_logic.initialize_full_score_widget_state(
+            session_state,
+            settings,
+            "exam:sheet",
+            "英语",
+        )
+        restored_math_key, restored_math_value = (
+            grade_logic.initialize_full_score_widget_state(
+                session_state,
+                settings,
+                "exam:sheet",
+                "数学",
+            )
+        )
+
+        self.assertEqual(math_key, "full_score::exam:sheet::数学")
+        self.assertEqual(restored_math_key, math_key)
+        self.assertNotEqual(english_key, math_key)
+        self.assertEqual((math_value, english_value, restored_math_value), (120.0, 150.0, 120.0))
+
+    def test_regenerated_widget_cannot_replace_saved_full_score_with_one(self):
+        settings = {"exam:sheet": {"数学": 120.0}}
+        session_state = {"full_score::exam:sheet::数学": 1.0}
+
+        key, initialized_value = grade_logic.initialize_full_score_widget_state(
+            session_state,
+            settings,
+            "exam:sheet",
+            "数学",
+        )
+        effective_value = grade_logic.set_column_full_score_safely(
+            settings,
+            "exam:sheet",
+            "数学",
+            session_state[key],
+        )
+
+        self.assertEqual(session_state[key], 120.0)
+        self.assertEqual(initialized_value, 120.0)
+        self.assertEqual(effective_value, 120.0)
+        self.assertEqual(settings["exam:sheet"]["数学"], 120.0)
+
+    def test_user_input_one_keeps_existing_full_score(self):
+        settings = {"exam:sheet": {"数学": 120.0}}
+
+        effective_value = grade_logic.set_column_full_score_safely(
+            settings,
+            "exam:sheet",
+            "数学",
+            1.0,
+        )
+
+        self.assertEqual(effective_value, 120.0)
+        self.assertEqual(settings["exam:sheet"]["数学"], 120.0)
 
     def test_analyze_scores_builds_summary_and_lists(self):
         result = analyze_scores({"Alice": 95, "Bob": 82, "Cindy": 76, "Dan": 58})

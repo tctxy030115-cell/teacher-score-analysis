@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from html import escape
 import re
 
@@ -23,9 +24,10 @@ def inject_global_styles() -> None:
         """
         <style>
         :root {
-            --dashboard-bg: #F4F7FB;
+            --dashboard-bg: #F5F7FA;
             --dashboard-card: #FFFFFF;
-            --dashboard-primary: #2563EB;
+            --dashboard-primary: #1F4E78;
+            --dashboard-accent: #2563EB;
             --dashboard-primary-soft: #EAF2FF;
             --dashboard-text: #172033;
             --dashboard-muted: #64748B;
@@ -82,7 +84,7 @@ def inject_global_styles() -> None:
             flex: 0 0 auto;
             background: var(--dashboard-primary);
             color: white;
-            box-shadow: 0 8px 18px rgba(37, 99, 235, .22);
+            box-shadow: 0 8px 18px rgba(31, 78, 120, .2);
         }
 
         .dashboard-logo {
@@ -158,7 +160,7 @@ def inject_global_styles() -> None:
         .sidebar-nav a:hover,
         .sidebar-nav a.is-active {
             background: var(--dashboard-primary-soft);
-            color: #1D4ED8 !important;
+            color: var(--dashboard-accent) !important;
         }
 
         .nav-icon {
@@ -175,7 +177,7 @@ def inject_global_styles() -> None:
 
         .sidebar-nav a.is-active .nav-icon {
             background: #DBEAFE;
-            color: var(--dashboard-primary);
+            color: var(--dashboard-accent);
         }
 
         .sidebar-mode-title {
@@ -257,7 +259,7 @@ def inject_global_styles() -> None:
             flex: 0 0 30px;
             border-radius: 9px;
             background: var(--dashboard-primary-soft);
-            color: var(--dashboard-primary);
+            color: var(--dashboard-accent);
             font-size: .8rem;
             font-weight: 800;
         }
@@ -315,7 +317,7 @@ def inject_global_styles() -> None:
             height: 26px;
             border-radius: 8px;
             background: var(--dashboard-primary-soft);
-            color: var(--dashboard-primary);
+            color: var(--dashboard-accent);
             font-size: .72rem;
             font-weight: 800;
         }
@@ -369,9 +371,261 @@ def inject_global_styles() -> None:
 
         .stButton button[kind="primary"],
         .stDownloadButton button[kind="primary"] {
-            background: var(--dashboard-primary);
-            border-color: var(--dashboard-primary);
+            background: var(--dashboard-accent);
+            border-color: var(--dashboard-accent);
             color: #FFFFFF;
+        }
+
+        .home-hero {
+            display: flex;
+            align-items: center;
+            gap: 1.2rem;
+            margin-bottom: 1.35rem;
+            padding: 1.65rem 1.75rem;
+            border: 1px solid var(--dashboard-border);
+            border-radius: 18px;
+            background: #FFFFFF;
+            box-shadow: var(--dashboard-shadow);
+        }
+
+        .home-hero-icon {
+            display: grid;
+            place-items: center;
+            width: 58px;
+            height: 58px;
+            flex: 0 0 58px;
+            border-radius: 16px;
+            background: #EAF2FF;
+            font-size: 1.65rem;
+        }
+
+        .home-eyebrow {
+            margin: 0 0 .25rem;
+            color: var(--dashboard-primary);
+            font-size: .76rem;
+            font-weight: 750;
+            letter-spacing: .08em;
+        }
+
+        .home-title {
+            margin: 0;
+            color: var(--dashboard-primary);
+            font-size: clamp(1.75rem, 3vw, 2.35rem);
+            line-height: 1.2;
+        }
+
+        .home-subtitle {
+            margin: .42rem 0 0;
+            color: #334155;
+            font-size: 1.02rem;
+            font-weight: 620;
+        }
+
+        .home-description {
+            margin: .42rem 0 0;
+            color: var(--dashboard-muted);
+            font-size: .92rem;
+        }
+
+        .home-task-heading {
+            margin: 1.55rem 0 .85rem;
+        }
+
+        .home-task-heading h2 {
+            margin: 0;
+            color: var(--dashboard-text);
+            font-size: 1.2rem;
+        }
+
+        .home-task-heading p {
+            margin: .25rem 0 0;
+            color: var(--dashboard-muted);
+            font-size: .88rem;
+        }
+
+        .task-card-copy {
+            min-height: 150px;
+        }
+
+        .task-card-icon {
+            font-size: 1.45rem;
+        }
+
+        .task-card-title {
+            margin: .65rem 0 .35rem;
+            color: var(--dashboard-primary);
+            font-size: 1.08rem;
+        }
+
+        .task-card-description {
+            margin: 0;
+            color: var(--dashboard-muted);
+            font-size: .9rem;
+            line-height: 1.7;
+        }
+
+        .exam-center-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1.5rem;
+            margin-bottom: 1rem;
+            padding: 1.4rem 1.55rem;
+            border: 1px solid var(--dashboard-border);
+            border-radius: 18px;
+            background: #FFFFFF;
+            box-shadow: var(--dashboard-shadow);
+        }
+
+        .exam-center-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(92px, 1fr));
+            gap: .65rem;
+        }
+
+        .exam-center-metrics div {
+            padding: .7rem .85rem;
+            border-radius: 12px;
+            background: #F5F8FC;
+            text-align: center;
+        }
+
+        .exam-center-metrics span,
+        .exam-center-card span {
+            display: block;
+            color: var(--dashboard-muted);
+            font-size: .78rem;
+        }
+
+        .exam-center-metrics strong {
+            display: block;
+            margin-top: .2rem;
+            color: var(--dashboard-primary);
+            font-size: 1.05rem;
+        }
+
+        .exam-status-ready {
+            color: #16803A !important;
+        }
+
+        .exam-center-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: .85rem;
+            margin-bottom: 1rem;
+        }
+
+        .exam-center-card {
+            display: block;
+            padding: 1rem 1.05rem;
+            border: 1px solid var(--dashboard-border);
+            border-radius: 14px;
+            background: #FFFFFF;
+            color: var(--dashboard-primary) !important;
+            text-decoration: none !important;
+            box-shadow: var(--dashboard-shadow);
+        }
+
+        .exam-center-card:hover {
+            border-color: #BFD2EC;
+        }
+
+        .exam-center-card-icon {
+            margin-bottom: .35rem;
+            color: inherit !important;
+            font-size: 1.25rem !important;
+        }
+
+        .exam-center-card strong {
+            display: block;
+            margin-bottom: .25rem;
+        }
+
+        .analysis-view-copy {
+            min-height: 168px;
+        }
+
+        .analysis-view-copy h3 {
+            margin: .6rem 0 .4rem;
+            color: var(--dashboard-primary);
+            font-size: 1.08rem;
+        }
+
+        .analysis-view-copy p {
+            margin: 0;
+            color: var(--dashboard-muted);
+            font-size: .88rem;
+            line-height: 1.7;
+        }
+
+        .teacher-view-placeholder ul {
+            display: inline-block;
+            margin: 0 auto .85rem;
+            color: var(--dashboard-muted);
+            text-align: left;
+            line-height: 1.9;
+        }
+
+        .workflow-steps {
+            display: flex;
+            align-items: center;
+            gap: .7rem;
+            margin: 0 0 1.2rem;
+            padding: .85rem 1rem;
+            border: 1px solid var(--dashboard-border);
+            border-radius: 13px;
+            background: #FFFFFF;
+            color: #526079;
+            font-size: .84rem;
+            font-weight: 620;
+        }
+
+        .workflow-step {
+            display: flex;
+            align-items: center;
+            gap: .35rem;
+            white-space: nowrap;
+        }
+
+        .workflow-step-number {
+            color: var(--dashboard-accent);
+            font-weight: 800;
+        }
+
+        .workflow-arrow {
+            color: #A3AFC0;
+        }
+
+        .upcoming-feature {
+            padding: 1.35rem .5rem;
+            text-align: center;
+        }
+
+        .upcoming-feature-icon {
+            font-size: 2rem;
+        }
+
+        .upcoming-feature h2 {
+            margin: .65rem 0 .4rem;
+            color: var(--dashboard-primary);
+            font-size: 1.22rem;
+        }
+
+        .upcoming-feature p {
+            max-width: 650px;
+            margin: 0 auto .85rem;
+            color: var(--dashboard-muted);
+            line-height: 1.7;
+        }
+
+        .upcoming-feature span {
+            display: inline-block;
+            padding: .28rem .7rem;
+            border-radius: 999px;
+            background: #EAF2FF;
+            color: var(--dashboard-accent);
+            font-size: .78rem;
+            font-weight: 700;
         }
 
         div[data-testid="stFileUploaderDropzone"] {
@@ -401,6 +655,17 @@ def inject_global_styles() -> None:
         }
 
         @media (max-width: 720px) {
+            .exam-center-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .exam-center-metrics,
+            .exam-center-grid {
+                width: 100%;
+                grid-template-columns: 1fr;
+            }
+
             .block-container {
                 padding: 1rem .85rem 2rem;
             }
@@ -412,6 +677,21 @@ def inject_global_styles() -> None:
             .dashboard-logo {
                 width: 40px;
                 height: 40px;
+            }
+
+            .home-hero {
+                align-items: flex-start;
+                padding: 1.2rem;
+            }
+
+            .workflow-steps {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: .4rem;
+            }
+
+            .workflow-arrow {
+                display: none;
             }
 
             .metric-grid {
@@ -446,70 +726,85 @@ def render_sidebar(*, analysis_mode: str, on_mode_change):
         <div class="sidebar-brand">
             <div class="sidebar-logo">▥</div>
             <div>
-                <div class="sidebar-brand-title">成绩分析工具</div>
-                <div class="sidebar-brand-caption">教育数据仪表盘</div>
+                <div class="sidebar-brand-title">成绩分析中心</div>
+                <div class="sidebar-brand-caption">教师成绩分析助手</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.sidebar.markdown(
-        '<div class="sidebar-mode-title">分析模式</div>',
+        '<div class="sidebar-mode-title">任务导航</div>',
         unsafe_allow_html=True,
     )
-    st.sidebar.button(
-        "单班成绩分析",
-        key="analysis_mode_single_class",
-        type="primary" if analysis_mode == "single_class" else "secondary",
-        on_click=on_mode_change,
-        args=("single_class",),
-        width="stretch",
+    task_items = (
+        ("🏠 首页", "analysis_mode_home", "home"),
+        ("📥 新增考试", "analysis_mode_single_class", "single_class"),
     )
-    st.sidebar.button(
-        "多班级对比",
-        key="analysis_mode_class_comparison",
-        type="primary" if analysis_mode == "class_comparison" else "secondary",
-        on_click=on_mode_change,
-        args=("class_comparison",),
-        width="stretch",
-    )
-    navigation_items = (
-        (
+    for label, key, mode in task_items:
+        st.sidebar.button(
+            label,
+            key=key,
+            type="primary" if analysis_mode == mode else "secondary",
+            on_click=on_mode_change,
+            args=(mode,),
+            width="stretch",
+        )
+
+    exam_modes = {
+        "analysis_center",
+        "class_comparison",
+        "subject_analysis",
+        "teacher_view",
+        "report_center",
+        "exam_comparison",
+    }
+    if analysis_mode in exam_modes:
+        st.sidebar.markdown(
+            '<div class="sidebar-mode-title">当前考试</div>',
+            unsafe_allow_html=True,
+        )
+        exam_view_items = (
+            ("📊 年级总览", "analysis_mode_analysis_center", "analysis_center"),
+            ("🏫 班级分析", "analysis_mode_class_comparison", "class_comparison"),
+            ("📚 学科分析", "analysis_mode_subject_analysis", "subject_analysis"),
+            ("👩‍🏫 教师视角", "analysis_mode_teacher_view", "teacher_view"),
+            ("📈 学生成长", "analysis_mode_exam_comparison", "exam_comparison"),
+            ("📄 报告中心", "analysis_mode_report_center", "report_center"),
+        )
+        for label, key, mode in exam_view_items:
+            st.sidebar.button(
+                label,
+                key=key,
+                type="primary" if analysis_mode == mode else "secondary",
+                on_click=on_mode_change,
+                args=(mode,),
+                width="stretch",
+            )
+
+    if analysis_mode == "analysis_center":
+        navigation_items = (
             ("统", "核心统计", "section-overview"),
-            ("分", "成绩分布与等级占比", "section-distribution"),
-            ("科", "各科平均分", "section-subjects"),
-            ("明", "完整成绩明细", "section-details"),
-            ("优", "优秀学生", "section-excellent"),
-            ("升", "待提升学生", "section-improvement"),
-            ("出", "报告导出", "section-export"),
-        )
-        if analysis_mode == "single_class"
-        else (
-            ("比", "班级横向对比", "section-class-comparison"),
-            ("均", "平均得分率", "section-average-rate"),
-            ("及", "及格率对比", "section-pass-rate"),
-            ("优", "优秀率对比", "section-excellent-rate"),
+            ("分", "成绩分布", "section-distribution"),
             ("级", "等级结构", "section-level-structure"),
-            ("结", "自动结论", "section-conclusion"),
+            ("科", "各科平均分", "section-subjects"),
+            ("生", "学生成绩名单", "section-details"),
         )
-    )
-    navigation_links = "".join(
-        f'<a href="#{anchor}"><span class="nav-icon">{escape(icon)}</span>'
-        f'{escape(label)}</a>'
-        for icon, label, anchor in navigation_items
-    )
-    st.sidebar.markdown(
-        '<div class="sidebar-mode-title">当前页面导航</div>'
-        f'<nav class="sidebar-nav" aria-label="当前页面导航">{navigation_links}</nav>',
-        unsafe_allow_html=True,
-    )
+    else:
+        navigation_items = ()
+
+    if navigation_items:
+        navigation_links = "".join(
+            f'<a href="#{anchor}"><span class="nav-icon">{escape(icon)}</span>'
+            f'{escape(label)}</a>'
+            for icon, label, anchor in navigation_items
+        )
+        st.sidebar.markdown(
+            '<div class="sidebar-mode-title">当前页面导航</div>'
+            f'<nav class="sidebar-nav" aria-label="当前页面导航">{navigation_links}</nav>',
+            unsafe_allow_html=True,
+        )
     current_context_container = st.sidebar.container()
-    st.sidebar.button(
-        "两次考试对比（即将上线）",
-        key="analysis_mode_exam_comparison_upcoming",
-        disabled=True,
-        width="stretch",
-    )
     st.sidebar.markdown(
         '<div class="sidebar-footer">一线教师自用工具 · 持续更新中</div>',
         unsafe_allow_html=True,
@@ -538,17 +833,40 @@ def render_analysis_summary(items: dict[str, object]) -> None:
     )
 
 
-def render_page_header() -> None:
+def render_page_header(
+    *,
+    title: str = "成绩分析工具",
+    subtitle: str = "上传 Excel，自动完成成绩统计、可视化分析与 Word 报告。",
+    icon: str = "▥",
+) -> None:
     st.markdown(
-        """
+        f"""
         <header class="dashboard-header">
-            <div class="dashboard-logo">▥</div>
+            <div class="dashboard-logo">{escape(icon)}</div>
             <div>
-                <h1 class="dashboard-title">成绩分析工具</h1>
-                <p class="dashboard-subtitle">上传 Excel，自动完成成绩统计、可视化分析与 Word 报告。</p>
+                <h1 class="dashboard-title">{escape(title)}</h1>
+                <p class="dashboard-subtitle">{escape(subtitle)}</p>
             </div>
         </header>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_workflow_steps(steps: Sequence[str]) -> None:
+    number_labels = ("①", "②", "③", "④")
+    items = []
+    for index, step in enumerate(steps):
+        if index:
+            items.append('<span class="workflow-arrow">→</span>')
+        number = number_labels[index] if index < len(number_labels) else str(index + 1)
+        items.append(
+            '<span class="workflow-step">'
+            f'<span class="workflow-step-number">{number}</span>'
+            f'{escape(str(step))}</span>'
+        )
+    st.markdown(
+        f'<nav class="workflow-steps" aria-label="任务步骤">{"".join(items)}</nav>',
         unsafe_allow_html=True,
     )
 

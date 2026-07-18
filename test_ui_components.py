@@ -22,6 +22,7 @@ class UiComponentsTest(unittest.TestCase):
             "render_analysis_summary",
             "render_sidebar",
             "render_page_header",
+            "render_workflow_steps",
             "render_section_header",
             "render_metric_grid",
             "render_anchor",
@@ -35,7 +36,8 @@ class UiComponentsTest(unittest.TestCase):
             ui_components.inject_global_styles()
 
         html = markdown.call_args.args[0]
-        self.assertIn("#F4F7FB", html)
+        self.assertIn("#F5F7FA", html)
+        self.assertIn("#1F4E78", html)
         self.assertIn('section[data-testid="stSidebar"]', html)
         self.assertIn('[data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"]', html)
         self.assertNotIn('stVerticalBlockBorderWrapper', html)
@@ -85,34 +87,42 @@ class UiComponentsTest(unittest.TestCase):
             )
 
         rendered = "\n".join(call.args[0] for call in markdown.call_args_list)
-        self.assertIn("分析模式", rendered)
+        self.assertIn("成绩分析中心", rendered)
         self.assertIn("一线教师自用工具 · 持续更新中", rendered)
 
         calls_by_label = {call.args[0]: call.kwargs for call in button.call_args_list}
         self.assertEqual(
             set(calls_by_label),
-            {"单班成绩分析", "多班级对比", "两次考试对比（即将上线）"},
+            {
+                "🏠 首页",
+                "📥 新增考试",
+                "📊 年级总览",
+                "🏫 班级分析",
+                "📚 学科分析",
+                "👩‍🏫 教师视角",
+                "📈 学生成长",
+                "📄 报告中心",
+            },
         )
         keys = [kwargs["key"] for kwargs in calls_by_label.values()]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(
-            calls_by_label["单班成绩分析"]["key"],
+            calls_by_label["📥 新增考试"]["key"],
             "analysis_mode_single_class",
         )
         self.assertEqual(
-            calls_by_label["多班级对比"]["key"],
-            "analysis_mode_class_comparison",
+            calls_by_label["📊 年级总览"]["key"],
+            "analysis_mode_analysis_center",
         )
-        self.assertEqual(calls_by_label["多班级对比"]["type"], "primary")
-        self.assertEqual(calls_by_label["单班成绩分析"]["type"], "secondary")
-        self.assertTrue(calls_by_label["两次考试对比（即将上线）"]["disabled"])
-        self.assertIs(
-            calls_by_label["多班级对比"]["on_click"],
-            on_mode_change,
-        )
+        self.assertEqual(calls_by_label["🏫 班级分析"]["type"], "primary")
+        self.assertEqual(calls_by_label["📥 新增考试"]["type"], "secondary")
         self.assertEqual(
-            calls_by_label["多班级对比"]["args"],
-            ("class_comparison",),
+            calls_by_label["👩‍🏫 教师视角"]["args"],
+            ("teacher_view",),
+        )
+        self.assertIs(
+            calls_by_label["🏫 班级分析"]["on_click"],
+            on_mode_change,
         )
 
     def test_sidebar_highlights_single_class_mode(self):
@@ -127,10 +137,44 @@ class UiComponentsTest(unittest.TestCase):
             )
 
         calls_by_label = {call.args[0]: call.kwargs for call in button.call_args_list}
-        self.assertEqual(calls_by_label["单班成绩分析"]["type"], "primary")
-        self.assertEqual(calls_by_label["多班级对比"]["type"], "secondary")
+        self.assertEqual(calls_by_label["📥 新增考试"]["type"], "primary")
+        self.assertNotIn("📊 年级总览", calls_by_label)
 
-    def test_sidebar_renders_single_class_navigation_without_form_controls(self):
+    def test_report_center_highlights_report_navigation_and_keeps_export_anchor(self):
+        with (
+            patch("ui_components.st.sidebar.markdown") as markdown,
+            patch("ui_components.st.sidebar.button") as button,
+            patch("ui_components.st.sidebar.container"),
+        ):
+            ui_components.render_sidebar(
+                analysis_mode="report_center",
+                on_mode_change=unittest.mock.Mock(),
+            )
+
+        calls_by_label = {call.args[0]: call.kwargs for call in button.call_args_list}
+        self.assertEqual(calls_by_label["📄 报告中心"]["type"], "primary")
+        rendered = "\n".join(call.args[0] for call in markdown.call_args_list)
+        self.assertIn("当前考试", rendered)
+
+    def test_page_header_and_workflow_steps_support_task_specific_copy(self):
+        with patch("ui_components.st.markdown") as markdown:
+            ui_components.render_page_header(
+                title="班级比较",
+                subtitle="比较不同班级成绩差异。",
+                icon="🏫",
+            )
+            ui_components.render_workflow_steps(
+                ("上传成绩", "数据确认", "班级比较", "查看结论")
+            )
+
+        rendered = "\n".join(call.args[0] for call in markdown.call_args_list)
+        self.assertIn("班级比较", rendered)
+        self.assertIn("比较不同班级成绩差异。", rendered)
+        self.assertIn("①", rendered)
+        self.assertIn("④", rendered)
+        self.assertIn("workflow-steps", rendered)
+
+    def test_sidebar_renders_analysis_center_navigation_without_form_controls(self):
         self.require_ui_components()
         context_container = object()
         with (
@@ -144,19 +188,17 @@ class UiComponentsTest(unittest.TestCase):
             ) as container,
         ):
             returned_container = ui_components.render_sidebar(
-                analysis_mode="single_class",
+                analysis_mode="analysis_center",
                 on_mode_change=unittest.mock.Mock(),
             )
 
         rendered = "\n".join(call.args[0] for call in markdown.call_args_list)
         for label, anchor in (
             ("核心统计", "section-overview"),
-            ("成绩分布与等级占比", "section-distribution"),
+            ("成绩分布", "section-distribution"),
+            ("等级结构", "section-level-structure"),
             ("各科平均分", "section-subjects"),
-            ("完整成绩明细", "section-details"),
-            ("优秀学生", "section-excellent"),
-            ("待提升学生", "section-improvement"),
-            ("报告导出", "section-export"),
+            ("学生成绩名单", "section-details"),
         ):
             self.assertIn(label, rendered)
             self.assertIn(f'href="#{anchor}"', rendered)
@@ -166,11 +208,11 @@ class UiComponentsTest(unittest.TestCase):
         selectbox.assert_not_called()
         number_input.assert_not_called()
 
-    def test_sidebar_renders_class_comparison_navigation_with_semantic_anchors(self):
+    def test_sidebar_keeps_class_analysis_as_exam_level_view_without_chapter_list(self):
         self.require_ui_components()
         with (
             patch("ui_components.st.sidebar.markdown") as markdown,
-            patch("ui_components.st.sidebar.button"),
+            patch("ui_components.st.sidebar.button") as button,
             patch("ui_components.st.sidebar.container"),
         ):
             ui_components.render_sidebar(
@@ -179,16 +221,9 @@ class UiComponentsTest(unittest.TestCase):
             )
 
         rendered = "\n".join(call.args[0] for call in markdown.call_args_list)
-        for label, anchor in (
-            ("班级横向对比", "section-class-comparison"),
-            ("平均得分率", "section-average-rate"),
-            ("及格率对比", "section-pass-rate"),
-            ("优秀率对比", "section-excellent-rate"),
-            ("等级结构", "section-level-structure"),
-            ("自动结论", "section-conclusion"),
-        ):
-            self.assertIn(label, rendered)
-            self.assertIn(f'href="#{anchor}"', rendered)
+        self.assertIn("当前考试", rendered)
+        self.assertIn("🏫 班级分析", {call.args[0] for call in button.call_args_list})
+        self.assertNotIn("班级横向对比", rendered)
         self.assertNotIn("section-overview", rendered)
 
     def test_current_context_is_a_single_weak_line(self):
@@ -235,13 +270,22 @@ class UiComponentsTest(unittest.TestCase):
         ):
             self.assertIn(key, source)
 
+    def test_analysis_score_options_use_centralized_column_roles(self):
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("build_score_column_options(", source)
+        self.assertNotIn(
+            "if column not in {name_col, class_col, student_id_col}",
+            source,
+        )
+
     def test_filtered_single_class_result_still_feeds_excel_and_word_exports(self):
         source = Path("app.py").read_text(encoding="utf-8")
 
         filter_position = source.index("analysis_df = filter_dataframe_by_class")
-        analysis_position = source.index("analysis_result = analyze_scores")
+        analysis_position = source.index("identity_analysis_result = analyze_scores")
         self.assertLess(filter_position, analysis_position)
-        self.assertIn("export_score_result_to_bytes(analysis_result)", source)
+        self.assertIn("export_score_result_to_bytes(export_analysis_result)", source)
         self.assertIn("analysis_result=analysis_result", source)
         self.assertIn("selected_class=selected_class", source)
 
